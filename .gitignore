@@ -3,15 +3,12 @@
 # =========================
 
 # Ignore all datasets and large files
-GPUDBMentalBenchmark/Data/
+GPUDBMentalBenchmark/Data/SF-1/
 *.tbl
-*.csv
-*.bin
-*.parquet
-*.zip
-*.tar
-*.mp4
-*.mov
+
+GPUDBMentalBenchmark/Data/SF-10/
+*.tbl
+
 
 # macOS + Xcode temp files
 .DS_Store
