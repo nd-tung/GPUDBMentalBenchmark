@@ -7,6 +7,7 @@
 	objects = {
 
 /* Begin PBXBuildFile section */
+		9329C8922E99A1F000E6EC56 /* TPC-H Query 1.txt in Sources */ = {isa = PBXBuildFile; fileRef = 9329C8912E99A1DF00E6EC56 /* TPC-H Query 1.txt */; };
 		936502402E995E6B0018DCB2 /* Metal.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = 9365023F2E995E6B0018DCB2 /* Metal.framework */; };
 /* End PBXBuildFile section */
 
@@ -23,6 +24,8 @@
 /* End PBXCopyFilesBuildPhase section */
 
 /* Begin PBXFileReference section */
+		9329C8912E99A1DF00E6EC56 /* TPC-H Query 1.txt */ = {isa = PBXFileReference; lastKnownFileType = text; path = "TPC-H Query 1.txt"; sourceTree = "<group>"; };
+		9329C8932E99AC5B00E6EC56 /* readme.md */ = {isa = PBXFileReference; lastKnownFileType = net.daringfireball.markdown; path = readme.md; sourceTree = "<group>"; };
 		9365022E2E995B5D0018DCB2 /* GPUDBMentalBenchmark */ = {isa = PBXFileReference; explicitFileType = "compiled.mach-o.executable"; includeInIndex = 0; path = GPUDBMentalBenchmark; sourceTree = BUILT_PRODUCTS_DIR; };
 		9365023F2E995E6B0018DCB2 /* Metal.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = Metal.framework; path = System/Library/Frameworks/Metal.framework; sourceTree = SDKROOT; };
 /* End PBXFileReference section */
@@ -50,6 +53,8 @@
 		936502252E995B5D0018DCB2 = {
 			isa = PBXGroup;
 			children = (
+				9329C8932E99AC5B00E6EC56 /* readme.md */,
+				9329C8912E99A1DF00E6EC56 /* TPC-H Query 1.txt */,
 				9365022F2E995B5D0018DCB2 /* Products */,
 				936502302E995B5D0018DCB2 /* GPUDBMentalBenchmark */,
 				9365023E2E995E6A0018DCB2 /* Frameworks */,
@@ -108,6 +113,7 @@
 				TargetAttributes = {
 					9365022D2E995B5D0018DCB2 = {
 						CreatedOnToolsVersion = 26.0.1;
+						LastSwiftMigration = 2600;
 					};
 				};
 			};
@@ -135,6 +141,7 @@
 			isa = PBXSourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
+				9329C8922E99A1F000E6EC56 /* TPC-H Query 1.txt in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -259,16 +266,21 @@
 		936502362E995B5D0018DCB2 /* Debug */ = {
 			isa = XCBuildConfiguration;
 			buildSettings = {
+				CLANG_ENABLE_MODULES = YES;
 				CODE_SIGN_STYLE = Automatic;
 				PRODUCT_NAME = "$(TARGET_NAME)";
+				SWIFT_OPTIMIZATION_LEVEL = "-Onone";
+				SWIFT_VERSION = 6.0;
 			};
 			name = Debug;
 		};
 		936502372E995B5D0018DCB2 /* Release */ = {
 			isa = XCBuildConfiguration;
 			buildSettings = {
+				CLANG_ENABLE_MODULES = YES;
 				CODE_SIGN_STYLE = Automatic;
 				PRODUCT_NAME = "$(TARGET_NAME)";
+				SWIFT_VERSION = 6.0;
 			};
 			name = Release;
 		};
