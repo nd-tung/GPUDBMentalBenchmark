@@ -1,0 +1,19 @@
+# =========================
+# Git ignore for GPUDBMentalBenchmark
+# =========================
+
+# Ignore all datasets and large files
+GPUDBMentalBenchmark/Data/
+*.tbl
+*.csv
+*.bin
+*.parquet
+*.zip
+*.tar
+*.mp4
+*.mov
+
+# macOS + Xcode temp files
+.DS_Store
+*/xcuserdata/
+DerivedData/
