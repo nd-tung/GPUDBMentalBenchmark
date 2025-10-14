@@ -23,7 +23,7 @@ kernel void selection_kernel(const device int  *inData,        // Input data col
 // Stage 1: Reduces a partition of the input data into a single partial sum per threadgroup.
 kernel void sum_kernel_stage1(const device float* inData,
                               device float* partialSums,
-                              constant uint& dataSize, // <-- NEW: Pass in the actual data size
+                              constant uint& dataSize, 
                               uint group_id [[threadgroup_position_in_grid]],
                               uint thread_id_in_group [[thread_index_in_threadgroup]],
                               uint threads_per_group [[threads_per_threadgroup]])

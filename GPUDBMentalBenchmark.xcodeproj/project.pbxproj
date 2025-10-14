@@ -8,6 +8,8 @@
 
 /* Begin PBXBuildFile section */
 		9329C8922E99A1F000E6EC56 /* TPC-H Query 1.txt in Sources */ = {isa = PBXBuildFile; fileRef = 9329C8912E99A1DF00E6EC56 /* TPC-H Query 1.txt */; };
+		934F78C42E9D3087009F43BF /* QuartzCore.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = 934F78C32E9D3087009F43BF /* QuartzCore.framework */; };
+		934F78C62E9D3096009F43BF /* Foundation.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = 934F78C52E9D3096009F43BF /* Foundation.framework */; };
 		936502402E995E6B0018DCB2 /* Metal.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = 9365023F2E995E6B0018DCB2 /* Metal.framework */; };
 /* End PBXBuildFile section */
 
@@ -26,6 +28,8 @@
 /* Begin PBXFileReference section */
 		9329C8912E99A1DF00E6EC56 /* TPC-H Query 1.txt */ = {isa = PBXFileReference; lastKnownFileType = text; path = "TPC-H Query 1.txt"; sourceTree = "<group>"; };
 		9329C8932E99AC5B00E6EC56 /* readme.md */ = {isa = PBXFileReference; lastKnownFileType = net.daringfireball.markdown; path = readme.md; sourceTree = "<group>"; };
+		934F78C32E9D3087009F43BF /* QuartzCore.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = QuartzCore.framework; path = System/Library/Frameworks/QuartzCore.framework; sourceTree = SDKROOT; };
+		934F78C52E9D3096009F43BF /* Foundation.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = Foundation.framework; path = System/Library/Frameworks/Foundation.framework; sourceTree = SDKROOT; };
 		9365022E2E995B5D0018DCB2 /* GPUDBMentalBenchmark */ = {isa = PBXFileReference; explicitFileType = "compiled.mach-o.executable"; includeInIndex = 0; path = GPUDBMentalBenchmark; sourceTree = BUILT_PRODUCTS_DIR; };
 		9365023F2E995E6B0018DCB2 /* Metal.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = Metal.framework; path = System/Library/Frameworks/Metal.framework; sourceTree = SDKROOT; };
 /* End PBXFileReference section */
@@ -43,6 +47,8 @@
 			isa = PBXFrameworksBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
+				934F78C62E9D3096009F43BF /* Foundation.framework in Frameworks */,
+				934F78C42E9D3087009F43BF /* QuartzCore.framework in Frameworks */,
 				936502402E995E6B0018DCB2 /* Metal.framework in Frameworks */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
@@ -72,6 +78,8 @@
 		9365023E2E995E6A0018DCB2 /* Frameworks */ = {
 			isa = PBXGroup;
 			children = (
+				934F78C52E9D3096009F43BF /* Foundation.framework */,
+				934F78C32E9D3087009F43BF /* QuartzCore.framework */,
 				9365023F2E995E6B0018DCB2 /* Metal.framework */,
 			);
 			name = Frameworks;
@@ -268,6 +276,7 @@
 			buildSettings = {
 				CLANG_ENABLE_MODULES = YES;
 				CODE_SIGN_STYLE = Automatic;
+				HEADER_SEARCH_PATHS = "\"$(SRCROOT)/GPUDBMentalBenchmark/metal-cpp\"";
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				SWIFT_OPTIMIZATION_LEVEL = "-Onone";
 				SWIFT_VERSION = 6.0;
@@ -279,6 +288,7 @@
 			buildSettings = {
 				CLANG_ENABLE_MODULES = YES;
 				CODE_SIGN_STYLE = Automatic;
+				HEADER_SEARCH_PATHS = "\"$(SRCROOT)/GPUDBMentalBenchmark/metal-cpp\"";
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				SWIFT_VERSION = 6.0;
 			};
