@@ -10,6 +10,9 @@
 #include <string>
 #include <map>
 #include <algorithm>
+#include <chrono>
+#include <iomanip>
+#include <cmath>
 
 // --- Helper to Load Integer Column ---
 std::vector<int> loadIntColumn(const std::string& filePath, int columnIndex) {
@@ -534,6 +537,349 @@ void runQ1Benchmark(MTL::Device* device, MTL::CommandQueue* commandQueue, MTL::L
 }
 
 
+// C++ structs for reading final results
+struct Q3Result {
+    int orderkey;
+    float revenue;
+    int orderdate;
+    int shippriority;
+};
+
+struct Q3Aggregates_CPU {
+    int key;
+    float revenue;
+    unsigned int orderdate;
+    unsigned int shippriority;
+};
+
+
+// --- Main Function for TPC-H Q3 Benchmark ---
+void runQ3Benchmark(MTL::Device* pDevice, MTL::CommandQueue* pCommandQueue, MTL::Library* pLibrary) {
+    std::cout << "\n--- Running TPC-H Query 3 Benchmark ---" << std::endl;
+
+    // 1. Load data for all three tables
+    const std::string sf_path = "Data/SF-10/";
+    auto c_custkey = loadIntColumn(sf_path + "customer.tbl", 0);
+    auto c_mktsegment = loadCharColumn(sf_path + "customer.tbl", 6);
+
+    auto o_orderkey = loadIntColumn(sf_path + "orders.tbl", 0);
+    auto o_custkey = loadIntColumn(sf_path + "orders.tbl", 1);
+    auto o_orderdate = loadDateColumn(sf_path + "orders.tbl", 4);
+    auto o_shippriority = loadIntColumn(sf_path + "orders.tbl", 7);
+
+    auto l_orderkey = loadIntColumn(sf_path + "lineitem.tbl", 0);
+    auto l_shipdate = loadDateColumn(sf_path + "lineitem.tbl", 10);
+    auto l_extendedprice = loadFloatColumn(sf_path + "lineitem.tbl", 5);
+    auto l_discount = loadFloatColumn(sf_path + "lineitem.tbl", 6);
+    
+    const uint customer_size = (uint)c_custkey.size();
+    const uint orders_size = (uint)o_orderkey.size();
+    const uint lineitem_size = (uint)l_orderkey.size();
+    std::cout << "Loaded " << customer_size << " customers, " << orders_size << " orders, " << lineitem_size << " lineitem rows." << std::endl;
+
+    // 2. Setup all kernels
+    NS::Error* pError = nullptr;
+    MTL::Function* pCustBuildFn = pLibrary->newFunction(NS::String::string("q3_build_customer_ht_kernel", NS::UTF8StringEncoding));
+    MTL::ComputePipelineState* pCustBuildPipe = pDevice->newComputePipelineState(pCustBuildFn, &pError);
+
+    MTL::Function* pOrdersBuildFn = pLibrary->newFunction(NS::String::string("q3_build_orders_ht_kernel", NS::UTF8StringEncoding));
+    MTL::ComputePipelineState* pOrdersBuildPipe = pDevice->newComputePipelineState(pOrdersBuildFn, &pError);
+    
+    MTL::Function* pProbeAggFn = pLibrary->newFunction(NS::String::string("q3_probe_and_local_agg_kernel", NS::UTF8StringEncoding));
+    MTL::ComputePipelineState* pProbeAggPipe = pDevice->newComputePipelineState(pProbeAggFn, &pError);
+
+    MTL::Function* pMergeFn = pLibrary->newFunction(NS::String::string("q3_merge_results_kernel", NS::UTF8StringEncoding));
+    MTL::ComputePipelineState* pMergePipe = pDevice->newComputePipelineState(pMergeFn, &pError);
+
+    // 3. Create Buffers
+    // Customer build buffers
+    const uint customer_ht_size = customer_size * 2;
+    std::vector<int> cpu_customer_ht(customer_ht_size * 2, -1);
+    MTL::Buffer* pCustKeyBuffer = pDevice->newBuffer(c_custkey.data(), customer_size * sizeof(int), MTL::ResourceStorageModeShared);
+    MTL::Buffer* pCustMktBuffer = pDevice->newBuffer(c_mktsegment.data(), customer_size * sizeof(char), MTL::ResourceStorageModeShared);
+    MTL::Buffer* pCustomerHTBuffer = pDevice->newBuffer(cpu_customer_ht.data(), customer_ht_size * sizeof(int) * 2, MTL::ResourceStorageModeShared);
+
+    // Orders build buffers
+    const uint orders_ht_size = orders_size * 2;
+    std::vector<int> cpu_orders_ht(orders_ht_size * 2, -1);
+    MTL::Buffer* pOrdKeyBuffer = pDevice->newBuffer(o_orderkey.data(), orders_size * sizeof(int), MTL::ResourceStorageModeShared);
+    MTL::Buffer* pOrdCustKeyBuffer = pDevice->newBuffer(o_custkey.data(), orders_size * sizeof(int), MTL::ResourceStorageModeShared);
+    MTL::Buffer* pOrdDateBuffer = pDevice->newBuffer(o_orderdate.data(), orders_size * sizeof(int), MTL::ResourceStorageModeShared);
+    MTL::Buffer* pOrdPrioBuffer = pDevice->newBuffer(o_shippriority.data(), orders_size * sizeof(int), MTL::ResourceStorageModeShared);
+    MTL::Buffer* pOrdersHTBuffer = pDevice->newBuffer(cpu_orders_ht.data(), orders_ht_size * sizeof(int) * 2, MTL::ResourceStorageModeShared);
+    
+    // Lineitem probe buffers
+    MTL::Buffer* pLineOrdKeyBuffer = pDevice->newBuffer(l_orderkey.data(), lineitem_size * sizeof(int), MTL::ResourceStorageModeShared);
+    MTL::Buffer* pLineShipDateBuffer = pDevice->newBuffer(l_shipdate.data(), lineitem_size * sizeof(int), MTL::ResourceStorageModeShared);
+    MTL::Buffer* pLinePriceBuffer = pDevice->newBuffer(l_extendedprice.data(), lineitem_size * sizeof(float), MTL::ResourceStorageModeShared);
+    MTL::Buffer* pLineDiscBuffer = pDevice->newBuffer(l_discount.data(), lineitem_size * sizeof(float), MTL::ResourceStorageModeShared);
+    
+    // Intermediate and final result buffers
+    const uint num_threadgroups = 2048;
+    const uint local_ht_size = 64;
+    const uint intermediate_size = num_threadgroups * local_ht_size;
+    MTL::Buffer* pIntermediateBuffer = pDevice->newBuffer(intermediate_size * sizeof(Q3Aggregates_CPU), MTL::ResourceStorageModeShared);
+
+    const uint final_ht_size = orders_size; // Can be large
+    std::vector<int> cpu_final_ht(final_ht_size * (sizeof(Q3Aggregates_CPU)/sizeof(int)), -1);
+    MTL::Buffer* pFinalHTBuffer = pDevice->newBuffer(cpu_final_ht.data(), final_ht_size * sizeof(Q3Aggregates_CPU), MTL::ResourceStorageModeShared);
+
+    // 4. Dispatch full pipeline in a single command buffer
+    MTL::CommandBuffer* pCommandBuffer = pCommandQueue->commandBuffer();
+    const int cutoff_date = 19950315;
+
+    // --- Stage 1: Build Customer HT ---
+    MTL::ComputeCommandEncoder* pCustBuildEncoder = pCommandBuffer->computeCommandEncoder();
+    pCustBuildEncoder->setComputePipelineState(pCustBuildPipe);
+    pCustBuildEncoder->setBuffer(pCustKeyBuffer, 0, 0);
+    pCustBuildEncoder->setBuffer(pCustMktBuffer, 0, 1);
+    pCustBuildEncoder->setBuffer(pCustomerHTBuffer, 0, 2);
+    pCustBuildEncoder->setBytes(&customer_size, sizeof(customer_size), 3);
+    pCustBuildEncoder->setBytes(&customer_ht_size, sizeof(customer_ht_size), 4);
+    pCustBuildEncoder->dispatchThreads(MTL::Size(customer_size, 1, 1), MTL::Size(1024, 1, 1));
+    pCustBuildEncoder->endEncoding();
+
+    // --- Stage 2: Build Orders HT ---
+    MTL::ComputeCommandEncoder* pOrdersBuildEncoder = pCommandBuffer->computeCommandEncoder();
+    pOrdersBuildEncoder->setComputePipelineState(pOrdersBuildPipe);
+    pOrdersBuildEncoder->setBuffer(pOrdKeyBuffer, 0, 0);
+    pOrdersBuildEncoder->setBuffer(pOrdCustKeyBuffer, 0, 1);
+    pOrdersBuildEncoder->setBuffer(pOrdDateBuffer, 0, 2);
+    pOrdersBuildEncoder->setBuffer(pOrdPrioBuffer, 0, 3);
+    pOrdersBuildEncoder->setBuffer(pOrdersHTBuffer, 0, 4);
+    pOrdersBuildEncoder->setBytes(&orders_size, sizeof(orders_size), 5);
+    pOrdersBuildEncoder->setBytes(&orders_ht_size, sizeof(orders_ht_size), 6);
+    pOrdersBuildEncoder->setBytes(&cutoff_date, sizeof(cutoff_date), 7);
+    pOrdersBuildEncoder->dispatchThreads(MTL::Size(orders_size, 1, 1), MTL::Size(1024, 1, 1));
+    pOrdersBuildEncoder->endEncoding();
+
+    // --- Stage 3: Probe & Local Aggregate ---
+    MTL::ComputeCommandEncoder* pProbeAggEncoder = pCommandBuffer->computeCommandEncoder();
+    pProbeAggEncoder->setComputePipelineState(pProbeAggPipe);
+    pProbeAggEncoder->setBuffer(pLineOrdKeyBuffer, 0, 0);
+    pProbeAggEncoder->setBuffer(pLineShipDateBuffer, 0, 1);
+    pProbeAggEncoder->setBuffer(pLinePriceBuffer, 0, 2);
+    pProbeAggEncoder->setBuffer(pLineDiscBuffer, 0, 3);
+    pProbeAggEncoder->setBuffer(pCustomerHTBuffer, 0, 4);
+    pProbeAggEncoder->setBuffer(pOrdersHTBuffer, 0, 5);
+    pProbeAggEncoder->setBuffer(pOrdDateBuffer, 0, 6); // Pass full arrays for lookup
+    pProbeAggEncoder->setBuffer(pOrdPrioBuffer, 0, 7);
+    pProbeAggEncoder->setBuffer(pIntermediateBuffer, 0, 8);
+    pProbeAggEncoder->setBytes(&lineitem_size, sizeof(lineitem_size), 9);
+    pProbeAggEncoder->setBytes(&customer_ht_size, sizeof(customer_ht_size), 10);
+    pProbeAggEncoder->setBytes(&orders_ht_size, sizeof(orders_ht_size), 11);
+    pProbeAggEncoder->setBytes(&cutoff_date, sizeof(cutoff_date), 12);
+    pProbeAggEncoder->dispatchThreadgroups(MTL::Size(num_threadgroups, 1, 1), MTL::Size(1024, 1, 1));
+    pProbeAggEncoder->endEncoding();
+    
+    // --- Stage 4: Merge ---
+    MTL::ComputeCommandEncoder* pMergeEncoder = pCommandBuffer->computeCommandEncoder();
+    pMergeEncoder->setComputePipelineState(pMergePipe);
+    pMergeEncoder->setBuffer(pIntermediateBuffer, 0, 0);
+    pMergeEncoder->setBuffer(pFinalHTBuffer, 0, 1);
+    pMergeEncoder->setBytes(&intermediate_size, sizeof(intermediate_size), 2);
+    pMergeEncoder->setBytes(&final_ht_size, sizeof(final_ht_size), 3);
+    pMergeEncoder->dispatchThreads(MTL::Size(intermediate_size, 1, 1), MTL::Size(1024, 1, 1));
+    pMergeEncoder->endEncoding();
+
+    // 5. Execute and time
+    pCommandBuffer->commit();
+    pCommandBuffer->waitUntilCompleted();
+    double gpuExecutionTime = pCommandBuffer->GPUEndTime() - pCommandBuffer->GPUStartTime();
+
+    // 6. Process and print final results
+    Q3Aggregates_CPU* results = (Q3Aggregates_CPU*)pFinalHTBuffer->contents();
+    std::vector<Q3Result> final_results;
+    for (uint i = 0; i < final_ht_size; ++i) {
+        if (results[i].key != -1) {
+            final_results.push_back({results[i].key, results[i].revenue, (int)results[i].orderdate, (int)results[i].shippriority});
+        }
+    }
+    
+    // Sort by revenue descending
+    std::sort(final_results.begin(), final_results.end(), [](const Q3Result& a, const Q3Result& b) {
+        return a.revenue > b.revenue;
+    });
+
+    printf("\nTPC-H Query 3 Results (Top 10):\n");
+    printf("+----------+------------+------------+--------------+\n");
+    printf("| orderkey |   revenue  | orderdate  | shippriority |\n");
+    printf("+----------+------------+------------+--------------+\n");
+    for (int i = 0; i < 10 && i < final_results.size(); ++i) {
+        printf("| %8d | $%10.2f | %10d | %12d |\n",
+               final_results[i].orderkey, final_results[i].revenue, final_results[i].orderdate, final_results[i].shippriority);
+    }
+    printf("+----------+------------+------------+--------------+\n");
+    printf("Total results found: %lu\n", final_results.size());
+    printf("Total TPC-H Q3 GPU time: %f ms\n", gpuExecutionTime * 1000.0);
+    
+    // Cleanup
+    pCustBuildFn->release();
+    pCustBuildPipe->release();
+    pOrdersBuildFn->release();
+    pOrdersBuildPipe->release();
+    pProbeAggFn->release();
+    pProbeAggPipe->release();
+    pMergeFn->release();
+    pMergePipe->release();
+    
+    pCustKeyBuffer->release();
+    pCustMktBuffer->release();
+    pCustomerHTBuffer->release();
+    pOrdKeyBuffer->release();
+    pOrdCustKeyBuffer->release();
+    pOrdDateBuffer->release();
+    pOrdPrioBuffer->release();
+    pOrdersHTBuffer->release();
+    pLineOrdKeyBuffer->release();
+    pLineShipDateBuffer->release();
+    pLinePriceBuffer->release();
+    pLineDiscBuffer->release();
+    pIntermediateBuffer->release();
+    pFinalHTBuffer->release();
+}
+
+
+// --- Main Function for TPC-H Query 6 Benchmark ---
+void runQ6Benchmark(MTL::Device* device, MTL::CommandQueue* commandQueue, MTL::Library* library) {
+    std::cout << "--- Running TPC-H Query 6 Benchmark ---" << std::endl;
+    
+    // Load required columns from lineitem table
+    std::vector<int> l_shipdate = loadDateColumn("Data/SF-10/lineitem.tbl", 10);    // Column 10: l_shipdate
+    std::vector<float> l_discount = loadFloatColumn("Data/SF-10/lineitem.tbl", 6);  // Column 6: l_discount
+    std::vector<float> l_quantity = loadFloatColumn("Data/SF-10/lineitem.tbl", 4);  // Column 4: l_quantity
+    std::vector<float> l_extendedprice = loadFloatColumn("Data/SF-10/lineitem.tbl", 5); // Column 5: l_extendedprice
+
+    if (l_shipdate.empty() || l_discount.empty() || l_quantity.empty() || l_extendedprice.empty()) {
+        std::cerr << "Error: Could not load required columns for Q6 benchmark" << std::endl;
+        return;
+    }
+
+    uint dataSize = (uint)l_shipdate.size();
+    std::cout << "Loaded " << dataSize << " rows for TPC-H Query 6." << std::endl;
+
+    // Query parameters
+    int start_date = 19940101;   // 1994-01-01
+    int end_date = 19950101;     // 1995-01-01
+    float min_discount = 0.05f;  // 5%
+    float max_discount = 0.07f;  // 7%
+    float max_quantity = 24.0f;
+
+    NS::Error* error = nullptr;
+    
+    // Create stage 1 pipeline (filter and sum)
+    NS::String* stage1FunctionName = NS::String::string("q6_filter_and_sum_stage1", NS::UTF8StringEncoding);
+    MTL::Function* stage1Function = library->newFunction(stage1FunctionName);
+    if (!stage1Function) {
+        std::cerr << "Error: Could not find q6_filter_and_sum_stage1 function" << std::endl;
+        return;
+    }
+    MTL::ComputePipelineState* stage1Pipeline = device->newComputePipelineState(stage1Function, &error);
+    if (!stage1Pipeline) {
+        std::cerr << "Failed to create Q6 stage 1 pipeline state" << std::endl;
+        if (error) {
+            std::cerr << "Error: " << error->localizedDescription()->utf8String() << std::endl;
+        }
+        return;
+    }
+
+    // Create stage 2 pipeline (final sum)
+    NS::String* stage2FunctionName = NS::String::string("q6_final_sum_stage2", NS::UTF8StringEncoding);
+    MTL::Function* stage2Function = library->newFunction(stage2FunctionName);
+    if (!stage2Function) {
+        std::cerr << "Error: Could not find q6_final_sum_stage2 function" << std::endl;
+        return;
+    }
+    MTL::ComputePipelineState* stage2Pipeline = device->newComputePipelineState(stage2Function, &error);
+    if (!stage2Pipeline) {
+        std::cerr << "Failed to create Q6 stage 2 pipeline state" << std::endl;
+        if (error) {
+            std::cerr << "Error: " << error->localizedDescription()->utf8String() << std::endl;
+        }
+        return;
+    }
+
+    // Create GPU buffers
+    const int numThreadgroups = 2048;
+    MTL::Buffer* shipdateBuffer = device->newBuffer(l_shipdate.data(), dataSize * sizeof(int), MTL::ResourceStorageModeShared);
+    MTL::Buffer* discountBuffer = device->newBuffer(l_discount.data(), dataSize * sizeof(float), MTL::ResourceStorageModeShared);
+    MTL::Buffer* quantityBuffer = device->newBuffer(l_quantity.data(), dataSize * sizeof(float), MTL::ResourceStorageModeShared);
+    MTL::Buffer* extendedpriceBuffer = device->newBuffer(l_extendedprice.data(), dataSize * sizeof(float), MTL::ResourceStorageModeShared);
+    MTL::Buffer* partialRevenuesBuffer = device->newBuffer(numThreadgroups * sizeof(float), MTL::ResourceStorageModeShared);
+    MTL::Buffer* finalRevenueBuffer = device->newBuffer(sizeof(float), MTL::ResourceStorageModeShared);
+
+    // Execute GPU kernels
+    MTL::CommandBuffer* commandBuffer = commandQueue->commandBuffer();
+    
+    // Stage 1: Filter and compute partial revenue sums
+    MTL::ComputeCommandEncoder* stage1Encoder = commandBuffer->computeCommandEncoder();
+    stage1Encoder->setComputePipelineState(stage1Pipeline);
+    stage1Encoder->setBuffer(shipdateBuffer, 0, 0);
+    stage1Encoder->setBuffer(discountBuffer, 0, 1);
+    stage1Encoder->setBuffer(quantityBuffer, 0, 2);
+    stage1Encoder->setBuffer(extendedpriceBuffer, 0, 3);
+    stage1Encoder->setBuffer(partialRevenuesBuffer, 0, 4);
+    stage1Encoder->setBytes(&dataSize, sizeof(dataSize), 5);
+    stage1Encoder->setBytes(&start_date, sizeof(start_date), 6);
+    stage1Encoder->setBytes(&end_date, sizeof(end_date), 7);
+    stage1Encoder->setBytes(&min_discount, sizeof(min_discount), 8);
+    stage1Encoder->setBytes(&max_discount, sizeof(max_discount), 9);
+    stage1Encoder->setBytes(&max_quantity, sizeof(max_quantity), 10);
+
+    NS::UInteger stage1ThreadGroupSize = stage1Pipeline->maxTotalThreadsPerThreadgroup();
+    MTL::Size stage1GridSize = MTL::Size::Make(numThreadgroups, 1, 1);
+    MTL::Size stage1GroupSize = MTL::Size::Make(stage1ThreadGroupSize, 1, 1);
+    stage1Encoder->dispatchThreadgroups(stage1GridSize, stage1GroupSize);
+    stage1Encoder->endEncoding();
+
+    // Stage 2: Final sum reduction
+    MTL::ComputeCommandEncoder* stage2Encoder = commandBuffer->computeCommandEncoder();
+    stage2Encoder->setComputePipelineState(stage2Pipeline);
+    stage2Encoder->setBuffer(partialRevenuesBuffer, 0, 0);
+    stage2Encoder->setBuffer(finalRevenueBuffer, 0, 1);
+    
+    MTL::Size stage2GridSize = MTL::Size::Make(1, 1, 1);
+    MTL::Size stage2GroupSize = MTL::Size::Make(1, 1, 1);
+    stage2Encoder->dispatchThreads(stage2GridSize, stage2GroupSize);
+    stage2Encoder->endEncoding();
+
+    // Execute and measure time
+    auto startTime = std::chrono::high_resolution_clock::now();
+    commandBuffer->commit();
+    commandBuffer->waitUntilCompleted();
+    auto endTime = std::chrono::high_resolution_clock::now();
+    
+    double gpuExecutionTime = std::chrono::duration<double>(endTime - startTime).count();
+
+    // Get result
+    float* resultData = (float*)finalRevenueBuffer->contents();
+    float totalRevenue = resultData[0];
+
+    std::cout << "TPC-H Query 6 Result:" << std::endl;
+    std::cout << "Total Revenue: $" << std::fixed << std::setprecision(2) << totalRevenue << std::endl;
+    std::cout << "GPU execution time: " << gpuExecutionTime * 1000.0 << " ms" << std::endl;
+    
+    // Calculate effective bandwidth (rough estimate)
+    size_t totalDataBytes = dataSize * (sizeof(int) + 3 * sizeof(float)); // All input columns
+    double bandwidth = (totalDataBytes / (1024.0 * 1024.0 * 1024.0)) / gpuExecutionTime;
+    std::cout << "Effective Bandwidth: " << bandwidth << " GB/s" << std::endl << std::endl;
+
+    // Cleanup
+    stage1Function->release();
+    stage1Pipeline->release();
+    stage2Function->release();
+    stage2Pipeline->release();
+    shipdateBuffer->release();
+    discountBuffer->release();
+    quantityBuffer->release();
+    extendedpriceBuffer->release();
+    partialRevenuesBuffer->release();
+    finalRevenueBuffer->release();
+    stage1FunctionName->release();
+    stage2FunctionName->release();
+}
+
+
 // --- Main Entry Point ---
 int main(int argc, const char * argv[]) {
     NS::AutoreleasePool* pAutoreleasePool = NS::AutoreleasePool::alloc()->init();
@@ -558,11 +904,13 @@ int main(int argc, const char * argv[]) {
         }
     }
 
-    // Run all four benchmarks
-    runSelectionBenchmark(device, commandQueue, library);
-    runAggregationBenchmark(device, commandQueue, library);
-    runJoinBenchmark(device, commandQueue, library);
-    runQ1Benchmark(device, commandQueue, library);
+    // Run all benchmarks
+    // runSelectionBenchmark(device, commandQueue, library);
+    // runAggregationBenchmark(device, commandQueue, library);
+    // runJoinBenchmark(device, commandQueue, library);
+    // runQ1Benchmark(device, commandQueue, library);
+    runQ3Benchmark(device, commandQueue, library);
+    // runQ6Benchmark(device, commandQueue, library);
     
     // Cleanup
     library->release();
