@@ -47,15 +47,17 @@ std::vector<float> loadFloatColumn(const std::string& filePath, int columnIndex)
 }
 
 // Helper to Load char columns
-std::vector<char> loadCharColumn(const std::string& filePath, int columnIndex) {
-    std::vector<char> data;
-    std::ifstream file(filePath);
-    if (!file.is_open()) { std::cerr << "Error: Could not open file " << filePath << std::endl; return data; }
-    std::string line;
-    while (std::getline(file, line)) {
-        std::string token; int currentCol = 0; size_t start = 0; size_t end = line.find('|');
-        while (end != std::string::npos) {
-            if (currentCol == columnIndex) { token = line.substr(start, end - start); data.push_back(token[0]); break; }
+std::vector<char> loadCharColumn(const std::string& filePath, int columnIndex, int fixed_width = 0) {
+    std::vector<char> data; std::ifstream file(filePath); if (!file.is_open()) {
+        std::cerr << "Error: Could not open file " << filePath << std::endl; return data;
+    }
+    std::string line; while (std::getline(file, line)) { std::string token; int currentCol = 0; size_t start = 0; size_t end = line.find('|');
+        while (end != std::string::npos) { if (currentCol == columnIndex) { token = line.substr(start, end - start);
+            if (fixed_width > 0) { for(int i=0; i < fixed_width; ++i) data.push_back(i < token.length() ? token[i] : '\0'); }
+            else { data.push_back(token[0]);
+            }
+            break;
+        }
             start = end + 1; end = line.find('|', start); currentCol++;
         }
     }
@@ -880,6 +882,235 @@ void runQ6Benchmark(MTL::Device* device, MTL::CommandQueue* commandQueue, MTL::L
 }
 
 
+// C++ structs for reading final results
+struct Q9Result {
+    int nationkey;
+    int year;
+    float profit;
+};
+
+struct Q9Aggregates_CPU {
+    uint key;
+    float profit;
+};
+
+
+// --- Main Function for TPC-H Q9 Benchmark ---
+void runQ9Benchmark(MTL::Device* pDevice, MTL::CommandQueue* pCommandQueue, MTL::Library* pLibrary) {
+    std::cout << "\n--- Running TPC-H Query 9 Benchmark ---" << std::endl;
+
+    const std::string sf_path = "Data/SF-1/";
+    
+    // 1. Load data for all SIX tables
+    auto p_partkey = loadIntColumn(sf_path + "part.tbl", 0);
+    auto p_name = loadCharColumn(sf_path + "part.tbl", 1, 55);
+    auto s_suppkey = loadIntColumn(sf_path + "supplier.tbl", 0);
+    auto s_nationkey = loadIntColumn(sf_path + "supplier.tbl", 3);
+    auto l_partkey = loadIntColumn(sf_path + "lineitem.tbl", 1);
+    auto l_suppkey = loadIntColumn(sf_path + "lineitem.tbl", 2);
+    auto l_orderkey = loadIntColumn(sf_path + "lineitem.tbl", 0);
+    auto l_quantity = loadFloatColumn(sf_path + "lineitem.tbl", 4);
+    auto l_extendedprice = loadFloatColumn(sf_path + "lineitem.tbl", 5);
+    auto l_discount = loadFloatColumn(sf_path + "lineitem.tbl", 6);
+    auto ps_partkey = loadIntColumn(sf_path + "partsupp.tbl", 0);
+    auto ps_suppkey = loadIntColumn(sf_path + "partsupp.tbl", 1);
+    auto ps_supplycost = loadFloatColumn(sf_path + "partsupp.tbl", 3);
+    auto o_orderkey = loadIntColumn(sf_path + "orders.tbl", 0);
+    auto o_orderdate = loadDateColumn(sf_path + "orders.tbl", 4);
+    auto n_nationkey = loadIntColumn(sf_path + "nation.tbl", 0);
+    auto n_name = loadCharColumn(sf_path + "nation.tbl", 1, 25);
+
+    // Create a map for nation names
+    std::map<int, std::string> nation_names;
+    for (size_t i = 0; i < n_nationkey.size(); ++i) {
+        nation_names[n_nationkey[i]] = std::string(&n_name[i * 25], 25);
+    }
+    
+    // Get sizes
+    const uint part_size = (uint)p_partkey.size(), supplier_size = (uint)s_suppkey.size(), lineitem_size = (uint)l_partkey.size();
+    const uint partsupp_size = (uint)ps_partkey.size(), orders_size = (uint)o_orderkey.size();
+    std::cout << "Loaded data for all tables." << std::endl;
+
+    // 2. Setup all kernel pipelines
+    NS::Error* pError = nullptr;
+    MTL::Function* pPartBuildFn = pLibrary->newFunction(NS::String::string("q9_build_part_ht_kernel", NS::UTF8StringEncoding));
+    MTL::ComputePipelineState* pPartBuildPipe = pDevice->newComputePipelineState(pPartBuildFn, &pError);
+    MTL::Function* pSuppBuildFn = pLibrary->newFunction(NS::String::string("q9_build_supplier_ht_kernel", NS::UTF8StringEncoding));
+    MTL::ComputePipelineState* pSuppBuildPipe = pDevice->newComputePipelineState(pSuppBuildFn, &pError);
+    MTL::Function* pPartSuppBuildFn = pLibrary->newFunction(NS::String::string("q9_build_partsupp_ht_kernel", NS::UTF8StringEncoding));
+    MTL::ComputePipelineState* pPartSuppBuildPipe = pDevice->newComputePipelineState(pPartSuppBuildFn, &pError);
+    MTL::Function* pOrdersBuildFn = pLibrary->newFunction(NS::String::string("q9_build_orders_ht_kernel", NS::UTF8StringEncoding));
+    MTL::ComputePipelineState* pOrdersBuildPipe = pDevice->newComputePipelineState(pOrdersBuildFn, &pError);
+    MTL::Function* pProbeAggFn = pLibrary->newFunction(NS::String::string("q9_probe_and_local_agg_kernel", NS::UTF8StringEncoding));
+    MTL::ComputePipelineState* pProbeAggPipe = pDevice->newComputePipelineState(pProbeAggFn, &pError);
+    MTL::Function* pMergeFn = pLibrary->newFunction(NS::String::string("q9_merge_results_kernel", NS::UTF8StringEncoding));
+    MTL::ComputePipelineState* pMergePipe = pDevice->newComputePipelineState(pMergeFn, &pError);
+
+    // 3. Create all GPU buffers
+    const uint part_ht_size = part_size * 2;
+    std::vector<int> cpu_part_ht(part_ht_size * 2, -1);
+    MTL::Buffer* pPartKeyBuffer = pDevice->newBuffer(p_partkey.data(), part_size * sizeof(int), MTL::ResourceStorageModeShared);
+    MTL::Buffer* pPartNameBuffer = pDevice->newBuffer(p_name.data(), p_name.size() * sizeof(char), MTL::ResourceStorageModeShared);
+    MTL::Buffer* pPartHTBuffer = pDevice->newBuffer(cpu_part_ht.data(), part_ht_size * sizeof(int) * 2, MTL::ResourceStorageModeShared);
+
+    const uint supplier_ht_size = supplier_size * 2;
+    std::vector<int> cpu_supplier_ht(supplier_ht_size * 2, -1);
+    MTL::Buffer* pSuppKeyBuffer = pDevice->newBuffer(s_suppkey.data(), supplier_size * sizeof(int), MTL::ResourceStorageModeShared);
+    MTL::Buffer* pSuppNationKeyBuffer = pDevice->newBuffer(s_nationkey.data(), supplier_size * sizeof(int), MTL::ResourceStorageModeShared);
+    MTL::Buffer* pSupplierHTBuffer = pDevice->newBuffer(cpu_supplier_ht.data(), supplier_ht_size * sizeof(int) * 2, MTL::ResourceStorageModeShared);
+    
+    const uint partsupp_ht_size = partsupp_size * 2;
+    std::vector<int> cpu_partsupp_ht(partsupp_ht_size * 2, -1);
+    MTL::Buffer* pPsPartKeyBuffer = pDevice->newBuffer(ps_partkey.data(), partsupp_size * sizeof(int), MTL::ResourceStorageModeShared);
+    MTL::Buffer* pPsSuppKeyBuffer = pDevice->newBuffer(ps_suppkey.data(), partsupp_size * sizeof(int), MTL::ResourceStorageModeShared);
+    MTL::Buffer* pPsSupplyCostBuffer = pDevice->newBuffer(ps_supplycost.data(), partsupp_size * sizeof(float), MTL::ResourceStorageModeShared);
+    MTL::Buffer* pPartSuppHTBuffer = pDevice->newBuffer(cpu_partsupp_ht.data(), partsupp_ht_size * sizeof(int) * 2, MTL::ResourceStorageModeShared);
+    
+    const uint orders_ht_size = orders_size * 2;
+    std::vector<int> cpu_orders_ht(orders_ht_size * 2, -1);
+    MTL::Buffer* pOrdKeyBuffer = pDevice->newBuffer(o_orderkey.data(), orders_size * sizeof(int), MTL::ResourceStorageModeShared);
+    MTL::Buffer* pOrdDateBuffer = pDevice->newBuffer(o_orderdate.data(), orders_size * sizeof(int), MTL::ResourceStorageModeShared);
+    MTL::Buffer* pOrdersHTBuffer = pDevice->newBuffer(cpu_orders_ht.data(), orders_ht_size * sizeof(int) * 2, MTL::ResourceStorageModeShared);
+
+    MTL::Buffer* pLinePartKeyBuffer = pDevice->newBuffer(l_partkey.data(), lineitem_size * sizeof(int), MTL::ResourceStorageModeShared);
+    MTL::Buffer* pLineSuppKeyBuffer = pDevice->newBuffer(l_suppkey.data(), lineitem_size * sizeof(int), MTL::ResourceStorageModeShared);
+    MTL::Buffer* pLineOrdKeyBuffer = pDevice->newBuffer(l_orderkey.data(), lineitem_size * sizeof(int), MTL::ResourceStorageModeShared);
+    MTL::Buffer* pLineQtyBuffer = pDevice->newBuffer(l_quantity.data(), lineitem_size * sizeof(float), MTL::ResourceStorageModeShared);
+    MTL::Buffer* pLinePriceBuffer = pDevice->newBuffer(l_extendedprice.data(), lineitem_size * sizeof(float), MTL::ResourceStorageModeShared);
+    MTL::Buffer* pLineDiscBuffer = pDevice->newBuffer(l_discount.data(), lineitem_size * sizeof(float), MTL::ResourceStorageModeShared);
+
+    const uint num_threadgroups = 2048, local_ht_size = 128, intermediate_size = num_threadgroups * local_ht_size;
+    MTL::Buffer* pIntermediateBuffer = pDevice->newBuffer(intermediate_size * sizeof(Q9Aggregates_CPU), MTL::ResourceStorageModeShared);
+    const uint final_ht_size = 25 * 10; // 25 nations * ~10 years
+    std::vector<uint> cpu_final_ht(final_ht_size * (sizeof(Q9Aggregates_CPU)/sizeof(uint)), 0);
+    MTL::Buffer* pFinalHTBuffer = pDevice->newBuffer(cpu_final_ht.data(), final_ht_size * sizeof(Q9Aggregates_CPU), MTL::ResourceStorageModeShared);
+
+    // 4. Dispatch the entire 6-stage pipeline
+    MTL::CommandBuffer* pCommandBuffer = pCommandQueue->commandBuffer();
+    
+    MTL::ComputeCommandEncoder* pEnc1 = pCommandBuffer->computeCommandEncoder();
+    pEnc1->setComputePipelineState(pPartBuildPipe);
+    pEnc1->setBuffer(pPartKeyBuffer, 0, 0); pEnc1->setBuffer(pPartNameBuffer, 0, 1);
+    pEnc1->setBuffer(pPartHTBuffer, 0, 2); pEnc1->setBytes(&part_size, sizeof(part_size), 3);
+    pEnc1->setBytes(&part_ht_size, sizeof(part_ht_size), 4);
+    pEnc1->dispatchThreads(MTL::Size(part_size, 1, 1), MTL::Size(1024, 1, 1));
+    pEnc1->endEncoding();
+    
+    MTL::ComputeCommandEncoder* pEnc2 = pCommandBuffer->computeCommandEncoder();
+    pEnc2->setComputePipelineState(pSuppBuildPipe);
+    pEnc2->setBuffer(pSuppKeyBuffer, 0, 0); pEnc2->setBuffer(pSuppNationKeyBuffer, 0, 1);
+    pEnc2->setBuffer(pSupplierHTBuffer, 0, 2); pEnc2->setBytes(&supplier_size, sizeof(supplier_size), 3);
+    pEnc2->setBytes(&supplier_ht_size, sizeof(supplier_ht_size), 4);
+    pEnc2->dispatchThreads(MTL::Size(supplier_size, 1, 1), MTL::Size(1024, 1, 1));
+    pEnc2->endEncoding();
+
+    MTL::ComputeCommandEncoder* pEnc3 = pCommandBuffer->computeCommandEncoder();
+    pEnc3->setComputePipelineState(pPartSuppBuildPipe);
+    pEnc3->setBuffer(pPsPartKeyBuffer, 0, 0); pEnc3->setBuffer(pPsSuppKeyBuffer, 0, 1);
+    pEnc3->setBuffer(pPartSuppHTBuffer, 0, 2); pEnc3->setBytes(&partsupp_size, sizeof(partsupp_size), 3);
+    pEnc3->setBytes(&partsupp_ht_size, sizeof(partsupp_ht_size), 4);
+    pEnc3->dispatchThreads(MTL::Size(partsupp_size, 1, 1), MTL::Size(1024, 1, 1));
+    pEnc3->endEncoding();
+
+    MTL::ComputeCommandEncoder* pEnc4 = pCommandBuffer->computeCommandEncoder();
+    pEnc4->setComputePipelineState(pOrdersBuildPipe);
+    pEnc4->setBuffer(pOrdKeyBuffer, 0, 0); pEnc4->setBuffer(pOrdDateBuffer, 0, 1);
+    pEnc4->setBuffer(pOrdersHTBuffer, 0, 2); pEnc4->setBytes(&orders_size, sizeof(orders_size), 3);
+    pEnc4->setBytes(&orders_ht_size, sizeof(orders_ht_size), 4);
+    pEnc4->dispatchThreads(MTL::Size(orders_size, 1, 1), MTL::Size(1024, 1, 1));
+    pEnc4->endEncoding();
+    
+    MTL::ComputeCommandEncoder* pEnc5 = pCommandBuffer->computeCommandEncoder();
+    pEnc5->setComputePipelineState(pProbeAggPipe);
+    pEnc5->setBuffer(pLineSuppKeyBuffer, 0, 0); pEnc5->setBuffer(pLinePartKeyBuffer, 0, 1);
+    pEnc5->setBuffer(pLineOrdKeyBuffer, 0, 2); pEnc5->setBuffer(pLinePriceBuffer, 0, 3);
+    pEnc5->setBuffer(pLineDiscBuffer, 0, 4); pEnc5->setBuffer(pLineQtyBuffer, 0, 5);
+    pEnc5->setBuffer(pPsSupplyCostBuffer, 0, 6); pEnc5->setBuffer(pPartHTBuffer, 0, 7);
+    pEnc5->setBuffer(pSupplierHTBuffer, 0, 8); pEnc5->setBuffer(pPartSuppHTBuffer, 0, 9);
+    pEnc5->setBuffer(pOrdersHTBuffer, 0, 10); pEnc5->setBuffer(pIntermediateBuffer, 0, 11);
+    pEnc5->setBytes(&lineitem_size, sizeof(lineitem_size), 12); pEnc5->setBytes(&part_ht_size, sizeof(part_ht_size), 13);
+    pEnc5->setBytes(&supplier_ht_size, sizeof(supplier_ht_size), 14); pEnc5->setBytes(&partsupp_ht_size, sizeof(partsupp_ht_size), 15);
+    pEnc5->setBytes(&orders_ht_size, sizeof(orders_ht_size), 16);
+    pEnc5->dispatchThreadgroups(MTL::Size(num_threadgroups, 1, 1), MTL::Size(1024, 1, 1));
+    pEnc5->endEncoding();
+    
+    MTL::ComputeCommandEncoder* pEnc6 = pCommandBuffer->computeCommandEncoder();
+    pEnc6->setComputePipelineState(pMergePipe);
+    pEnc6->setBuffer(pIntermediateBuffer, 0, 0); pEnc6->setBuffer(pFinalHTBuffer, 0, 1);
+    pEnc6->setBytes(&intermediate_size, sizeof(intermediate_size), 2); pEnc6->setBytes(&final_ht_size, sizeof(final_ht_size), 3);
+    pEnc6->dispatchThreads(MTL::Size(intermediate_size, 1, 1), MTL::Size(1024, 1, 1));
+    pEnc6->endEncoding();
+
+    // 5. Execute and time
+    pCommandBuffer->commit();
+    pCommandBuffer->waitUntilCompleted();
+    double gpuExecutionTime = pCommandBuffer->GPUEndTime() - pCommandBuffer->GPUStartTime();
+
+    // 6. Process and print final results
+    Q9Aggregates_CPU* results = (Q9Aggregates_CPU*)pFinalHTBuffer->contents();
+    std::vector<Q9Result> final_results;
+    for (uint i = 0; i < final_ht_size; ++i) {
+        if (results[i].key != 0) {
+            int nationkey = (results[i].key >> 16) & 0xFFFF;
+            int year = results[i].key & 0xFFFF;
+            final_results.push_back({nationkey, year, results[i].profit});
+        }
+    }
+    std::sort(final_results.begin(), final_results.end(), [](const Q9Result& a, const Q9Result& b) {
+        if (a.nationkey != b.nationkey) return a.nationkey < b.nationkey;
+        return a.year > b.year;
+    });
+
+    printf("\nTPC-H Query 9 Results (Top 15):\n");
+    printf("+------------+------+---------------+\n");
+    printf("| Nation     | Year |        Profit |\n");
+    printf("+------------+------+---------------+\n");
+    for (int i = 0; i < 15 && i < final_results.size(); ++i) {
+        printf("| %-10s | %4d | $%13.2f |\n",
+               nation_names[final_results[i].nationkey].c_str(), final_results[i].year, final_results[i].profit);
+    }
+    printf("+------------+------+---------------+\n");
+    printf("Total results found: %lu\n", final_results.size());
+    printf("Total TPC-H Q9 GPU time: %f ms\n", gpuExecutionTime * 1000.0);
+    
+    // Release all functions and pipelines
+    pPartBuildFn->release();
+    pPartBuildPipe->release();
+    pSuppBuildFn->release();
+    pSuppBuildPipe->release();
+    pPartSuppBuildFn->release();
+    pPartSuppBuildPipe->release();
+    pOrdersBuildFn->release();
+    pOrdersBuildPipe->release();
+    pProbeAggFn->release();
+    pProbeAggPipe->release();
+    pMergeFn->release();
+    pMergePipe->release();
+    
+    // Release all buffers
+    pPartKeyBuffer->release();
+    pPartNameBuffer->release();
+    pPartHTBuffer->release();
+    pSuppKeyBuffer->release();
+    pSuppNationKeyBuffer->release();
+    pSupplierHTBuffer->release();
+    pPsPartKeyBuffer->release();
+    pPsSuppKeyBuffer->release();
+    pPsSupplyCostBuffer->release();
+    pPartSuppHTBuffer->release();
+    pOrdKeyBuffer->release();
+    pOrdDateBuffer->release();
+    pOrdersHTBuffer->release();
+    pLinePartKeyBuffer->release();
+    pLineSuppKeyBuffer->release();
+    pLineOrdKeyBuffer->release();
+    pLineQtyBuffer->release();
+    pLinePriceBuffer->release();
+    pLineDiscBuffer->release();
+    pIntermediateBuffer->release();
+    pFinalHTBuffer->release();
+}
+
 // --- Main Entry Point ---
 int main(int argc, const char * argv[]) {
     NS::AutoreleasePool* pAutoreleasePool = NS::AutoreleasePool::alloc()->init();
@@ -909,8 +1140,9 @@ int main(int argc, const char * argv[]) {
     // runAggregationBenchmark(device, commandQueue, library);
     // runJoinBenchmark(device, commandQueue, library);
     // runQ1Benchmark(device, commandQueue, library);
-    runQ3Benchmark(device, commandQueue, library);
+    // runQ3Benchmark(device, commandQueue, library);
     // runQ6Benchmark(device, commandQueue, library);
+    runQ9Benchmark(device, commandQueue, library);
     
     // Cleanup
     library->release();

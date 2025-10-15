@@ -823,3 +823,290 @@ kernel void q3_merge_results_kernel(
         }
     }
 }
+
+
+// --- TPC-H Q9 KERNELS ---
+// TPC-H Query 9: Product Type Profit Measure Query
+/*
+SELECT 
+    nation,
+    o_year,
+    SUM(amount) AS sum_profit
+FROM (
+    SELECT 
+        n_name AS nation,
+        EXTRACT(year FROM o_orderdate) AS o_year,
+        l_extendedprice * (1 - l_discount) - ps_supplycost * l_quantity AS amount
+    FROM part, supplier, lineitem, partsupp, orders, nation
+    WHERE s_suppkey = l_suppkey
+      AND ps_suppkey = l_suppkey
+      AND ps_partkey = l_partkey
+      AND p_partkey = l_partkey
+      AND o_orderkey = l_orderkey
+      AND s_nationkey = n_nationkey
+      AND p_name LIKE '%green%'
+) AS profit
+GROUP BY nation, o_year
+ORDER BY nation, o_year DESC;
+*/
+
+// Struct for the final aggregation results for Q9
+struct Q9Aggregates {
+    atomic_uint key; // Packed (nation_key << 16) | year
+    atomic_float profit;
+};
+
+// A non-atomic version for fast local aggregation
+struct Q9Aggregates_Local {
+    uint key;
+    float profit;
+};
+
+// KERNEL 1: Build HT on PART, filtering for p_name LIKE '%green%'
+kernel void q9_build_part_ht_kernel(
+    const device int* p_partkey,
+    const device char* p_name, // Assuming p_name is a fixed-size char array
+    device HashTableEntry* part_ht,
+    constant uint& part_size,
+    constant uint& part_ht_size,
+    uint index [[thread_position_in_grid]])
+{
+    if (index >= part_size) return;
+    bool match = false;
+    for(int i = 0; i < 50; ++i) { // Simplified string search
+        if (p_name[index * 55 + i] == 'g' && p_name[index * 55 + i + 1] == 'r' &&
+            p_name[index * 55 + i + 2] == 'e' && p_name[index * 55 + i + 3] == 'e' &&
+            p_name[index * 55 + i + 4] == 'n') {
+            match = true;
+            break;
+        }
+    }
+    if (!match) return;
+
+    int key = p_partkey[index];
+    int value = 1; // Flag that part exists
+    uint hash_index = (uint)key % part_ht_size;
+    for (uint i = 0; i < part_ht_size; ++i) {
+        uint probe_index = (hash_index + i) % part_ht_size;
+        int expected = -1;
+        if (atomic_compare_exchange_weak_explicit(&part_ht[probe_index].key, &expected, key, memory_order_relaxed, memory_order_relaxed)) {
+            atomic_store_explicit(&part_ht[probe_index].value, value, memory_order_relaxed);
+            return;
+        }
+    }
+}
+
+// KERNEL 2: Build HT on SUPPLIER, storing nationkey as the value.
+kernel void q9_build_supplier_ht_kernel(
+    const device int* s_suppkey,
+    const device int* s_nationkey,
+    device HashTableEntry* supplier_ht,
+    constant uint& supplier_size,
+    constant uint& supplier_ht_size,
+    uint index [[thread_position_in_grid]])
+{
+    if (index >= supplier_size) return;
+    int key = s_suppkey[index];
+    int value = s_nationkey[index];
+    uint hash_index = (uint)key % supplier_ht_size;
+    for (uint i = 0; i < supplier_ht_size; ++i) {
+        uint probe_index = (hash_index + i) % supplier_ht_size;
+        int expected = -1;
+        if (atomic_compare_exchange_weak_explicit(&supplier_ht[probe_index].key, &expected, key, memory_order_relaxed, memory_order_relaxed)) {
+            atomic_store_explicit(&supplier_ht[probe_index].value, value, memory_order_relaxed);
+            return;
+        }
+    }
+}
+
+// KERNEL 3: Build HT on PARTSUPP, storing supplycost index as value
+kernel void q9_build_partsupp_ht_kernel(
+    const device int* ps_partkey,
+    const device int* ps_suppkey,
+    device HashTableEntry* partsupp_ht,
+    constant uint& partsupp_size,
+    constant uint& partsupp_ht_size,
+    uint index [[thread_position_in_grid]])
+{
+    if (index >= partsupp_size) return;
+    // Compound key (simplification, prone to collisions)
+    int key = (ps_partkey[index] * 31 + ps_suppkey[index]);
+    int value = (int)index; // Store index to original ps_supplycost array
+    uint hash_index = (uint)key % partsupp_ht_size;
+    for (uint i = 0; i < partsupp_ht_size; ++i) {
+        uint probe_index = (hash_index + i) % partsupp_ht_size;
+        int expected = -1;
+        if (atomic_compare_exchange_weak_explicit(&partsupp_ht[probe_index].key, &expected, key, memory_order_relaxed, memory_order_relaxed)) {
+            atomic_store_explicit(&partsupp_ht[probe_index].value, value, memory_order_relaxed);
+            return;
+        }
+    }
+}
+
+// KERNEL 4: Build HT on ORDERS, storing year as value
+kernel void q9_build_orders_ht_kernel(
+    const device int* o_orderkey,
+    const device int* o_orderdate,
+    device HashTableEntry* orders_ht,
+    constant uint& orders_size,
+    constant uint& orders_ht_size,
+    uint index [[thread_position_in_grid]])
+{
+    if (index >= orders_size) return;
+    int key = o_orderkey[index];
+    int value = o_orderdate[index] / 10000; // Extract year
+    uint hash_index = (uint)key % orders_ht_size;
+    for (uint i = 0; i < orders_ht_size; ++i) {
+        uint probe_index = (hash_index + i) % orders_ht_size;
+        int expected = -1;
+        if (atomic_compare_exchange_weak_explicit(&orders_ht[probe_index].key, &expected, key, memory_order_relaxed, memory_order_relaxed)) {
+            atomic_store_explicit(&orders_ht[probe_index].value, value, memory_order_relaxed);
+            return;
+        }
+    }
+}
+
+
+// KERNEL 5: The main kernel. Streams lineitem and probes all other hash tables.
+kernel void q9_probe_and_local_agg_kernel(
+    // lineitem columns
+    const device int* l_suppkey, const device int* l_partkey, const device int* l_orderkey,
+    const device float* l_extendedprice, const device float* l_discount, const device float* l_quantity,
+    // partsupp supplycost array
+    const device float* ps_supplycost,
+    // Pre-built hash tables
+    const device HashTableEntry* part_ht, const device HashTableEntry* supplier_ht,
+    const device HashTableEntry* partsupp_ht, const device HashTableEntry* orders_ht,
+    // Output buffer
+    device Q9Aggregates_Local* intermediate_results,
+    // Parameters
+    constant uint& lineitem_size, constant uint& part_ht_size, constant uint& supplier_ht_size,
+    constant uint& partsupp_ht_size, constant uint& orders_ht_size,
+    // Thread IDs
+    uint group_id [[threadgroup_position_in_grid]],
+    uint thread_id_in_group [[thread_index_in_threadgroup]],
+    uint threads_per_group [[threads_per_threadgroup]])
+{
+    const int local_ht_size = 128;
+    thread Q9Aggregates_Local local_ht[local_ht_size];
+    for (int i = thread_id_in_group; i < local_ht_size; i += threads_per_group) {
+        local_ht[i].key = 0; local_ht[i].profit = 0.0f;
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+
+    uint grid_size = threads_per_group * 2048;
+    for (uint i = (group_id * threads_per_group) + thread_id_in_group; i < lineitem_size; i += grid_size) {
+        int partkey = l_partkey[i], suppkey = l_suppkey[i], orderkey = l_orderkey[i];
+
+        // --- FAST PARALLEL PROBES ---
+        
+        // 1. Probe part_ht to check if part matches 'green' filter
+        bool part_match = false;
+        uint part_hash = (uint)partkey % part_ht_size;
+        for (uint j = 0; j < part_ht_size; ++j) {
+            uint probe_idx = (part_hash + j) % part_ht_size;
+            int p_key = atomic_load_explicit(&part_ht[probe_idx].key, memory_order_relaxed);
+            if (p_key == partkey) {
+                part_match = true;
+                break;
+            }
+            if (p_key == -1) break;
+        }
+        if (!part_match) continue;
+
+        // 2. Probe supplier_ht to get nationkey
+        int nationkey = -1;
+        uint supp_hash = (uint)suppkey % supplier_ht_size;
+        for (uint j = 0; j < supplier_ht_size; ++j) {
+            uint probe_idx = (supp_hash + j) % supplier_ht_size;
+            int s_key = atomic_load_explicit(&supplier_ht[probe_idx].key, memory_order_relaxed);
+            if (s_key == suppkey) {
+                nationkey = atomic_load_explicit(&supplier_ht[probe_idx].value, memory_order_relaxed);
+                break;
+            }
+            if (s_key == -1) break;
+        }
+        if (nationkey == -1) continue;
+
+        // 3. Probe partsupp_ht to get supply cost index
+        int ps_idx = -1;
+        int compound_key = (partkey * 31 + suppkey);
+        uint ps_hash = (uint)compound_key % partsupp_ht_size;
+        for (uint j = 0; j < partsupp_ht_size; ++j) {
+            uint probe_idx = (ps_hash + j) % partsupp_ht_size;
+            int table_key = atomic_load_explicit(&partsupp_ht[probe_idx].key, memory_order_relaxed);
+            if (table_key == compound_key) {
+                ps_idx = atomic_load_explicit(&partsupp_ht[probe_idx].value, memory_order_relaxed);
+                break;
+            }
+            if (table_key == -1) break;
+        }
+        if (ps_idx == -1) continue;
+
+        // 4. Probe orders_ht to get year
+        int year = -1;
+        uint ord_hash = (uint)orderkey % orders_ht_size;
+        for (uint j = 0; j < orders_ht_size; ++j) {
+            uint probe_idx = (ord_hash + j) % orders_ht_size;
+            int o_key = atomic_load_explicit(&orders_ht[probe_idx].key, memory_order_relaxed);
+            if (o_key == orderkey) {
+                year = atomic_load_explicit(&orders_ht[probe_idx].value, memory_order_relaxed);
+                break;
+            }
+            if (o_key == -1) break;
+        }
+        if (year == -1) continue;
+
+        // All probes succeeded!
+        
+        // --- AGGREGATE ---
+        float profit = l_extendedprice[i] * (1.0f - l_discount[i]) - ps_supplycost[ps_idx] * l_quantity[i];
+        uint agg_key = (uint)(nationkey << 16) | year;
+        uint agg_hash = agg_key % local_ht_size;
+
+        for(int k = 0; k < local_ht_size; ++k) {
+            uint probe_idx = (agg_hash + k) % local_ht_size;
+            if(local_ht[probe_idx].key == 0 || local_ht[probe_idx].key == agg_key) {
+                local_ht[probe_idx].key = agg_key;
+                local_ht[probe_idx].profit += profit;
+                break;
+            }
+        }
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    
+    // Write local results to global memory
+    for (int i = thread_id_in_group; i < local_ht_size; i += threads_per_group) {
+        if (local_ht[i].key != 0) {
+            intermediate_results[group_id * local_ht_size + i] = local_ht[i];
+        }
+    }
+}
+
+
+// KERNEL 6: Final merge kernel
+kernel void q9_merge_results_kernel(
+    const device Q9Aggregates_Local* intermediate_results,
+    device Q9Aggregates* final_hashtable,
+    constant uint& intermediate_size,
+    constant uint& final_hashtable_size,
+    uint index [[thread_position_in_grid]])
+{
+    // This logic from your implementation was correct and can be reused.
+    if (index >= intermediate_size) return;
+    Q9Aggregates_Local local_result = intermediate_results[index];
+    if (local_result.key == 0) return;
+
+    uint hash_index = local_result.key % final_hashtable_size;
+    for (uint i = 0; i < final_hashtable_size; ++i) {
+        uint probe_index = (hash_index + i) % final_hashtable_size;
+        uint expected = 0;
+        if (atomic_compare_exchange_weak_explicit(&final_hashtable[probe_index].key, &expected, local_result.key, memory_order_relaxed, memory_order_relaxed)) {
+            atomic_store_explicit(&final_hashtable[probe_index].profit, 0.0f, memory_order_relaxed);
+        }
+        if (atomic_load_explicit(&final_hashtable[probe_index].key, memory_order_relaxed) == local_result.key) {
+            atomic_fetch_add_explicit(&final_hashtable[probe_index].profit, local_result.profit, memory_order_relaxed);
+            return;
+        }
+    }
+}
