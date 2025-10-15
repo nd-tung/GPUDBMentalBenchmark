@@ -14,8 +14,6 @@ OBJ_DIR = $(BUILD_DIR)/obj
 # Compiler and flags
 CXX = clang++
 CXXFLAGS = -std=c++20 -Wall -Wextra -O3
-DEBUG_FLAGS = -g -DDEBUG -O0
-RELEASE_FLAGS = -DNDEBUG -O3
 
 # Include paths
 INCLUDES = -I$(METAL_CPP_DIR)
@@ -33,17 +31,7 @@ TARGET = $(BIN_DIR)/$(PROJECT_NAME)
 
 # Default target
 .PHONY: all
-all: release
-
-# Release build
-.PHONY: release
-release: CXXFLAGS += $(RELEASE_FLAGS)
-release: $(TARGET)
-
-# Debug build
-.PHONY: debug
-debug: CXXFLAGS += $(DEBUG_FLAGS)
-debug: $(TARGET)
+all: $(TARGET)
 
 # Create target executable
 $(TARGET): $(OBJECTS) | $(BIN_DIR)
@@ -101,6 +89,38 @@ run-sf1: $(TARGET)
 .PHONY: run-sf10
 run-sf10: run
 
+# Run TPC-H Query benchmarks individually
+.PHONY: run-q1
+run-q1: $(TARGET)
+	@echo "Running TPC-H Query 1 benchmark..."
+	@cd GPUDBMentalBenchmark && ../$(TARGET) q1
+
+.PHONY: run-q3
+run-q3: $(TARGET)
+	@echo "Running TPC-H Query 3 benchmark..."
+	@cd GPUDBMentalBenchmark && ../$(TARGET) q3
+
+.PHONY: run-q6
+run-q6: $(TARGET)
+	@echo "Running TPC-H Query 6 benchmark..."
+	@cd GPUDBMentalBenchmark && ../$(TARGET) q6
+
+.PHONY: run-q9
+run-q9: $(TARGET)
+	@echo "Running TPC-H Query 9 benchmark..."
+	@cd GPUDBMentalBenchmark && ../$(TARGET) q9
+
+.PHONY: run-q13
+run-q13: $(TARGET)
+	@echo "Running TPC-H Query 13 benchmark..."
+	@cd GPUDBMentalBenchmark && ../$(TARGET) q13
+
+# Run all TPC-H queries
+.PHONY: run-all-queries
+run-all-queries: $(TARGET)
+	@echo "Running all TPC-H Query benchmarks..."
+	@cd GPUDBMentalBenchmark && ../$(TARGET)
+
 # Check if required files exist
 .PHONY: check
 check:
@@ -112,6 +132,17 @@ check:
 	@test -d $(DATA_DIR) || (echo "ERROR: Data directory not found" && exit 1)
 	@test -d $(DATA_DIR)/SF-1 || echo "WARNING: SF-1 dataset not found"
 	@test -d $(DATA_DIR)/SF-10 || echo "WARNING: SF-10 dataset not found"
+	@echo "Checking TPC-H data files..."
+	@test -f $(DATA_DIR)/SF-1/lineitem.tbl || echo "WARNING: SF-1 lineitem.tbl not found"
+	@test -f $(DATA_DIR)/SF-1/orders.tbl || echo "WARNING: SF-1 orders.tbl not found"
+	@test -f $(DATA_DIR)/SF-1/customer.tbl || echo "WARNING: SF-1 customer.tbl not found"
+	@test -f $(DATA_DIR)/SF-1/part.tbl || echo "WARNING: SF-1 part.tbl not found"
+	@test -f $(DATA_DIR)/SF-1/supplier.tbl || echo "WARNING: SF-1 supplier.tbl not found"
+	@test -f $(DATA_DIR)/SF-1/partsupp.tbl || echo "WARNING: SF-1 partsupp.tbl not found"
+	@test -f $(DATA_DIR)/SF-1/nation.tbl || echo "WARNING: SF-1 nation.tbl not found"
+	@test -f $(DATA_DIR)/SF-10/lineitem.tbl || echo "WARNING: SF-10 lineitem.tbl not found"
+	@test -f $(DATA_DIR)/SF-10/orders.tbl || echo "WARNING: SF-10 orders.tbl not found"
+	@test -f $(DATA_DIR)/SF-10/customer.tbl || echo "WARNING: SF-10 customer.tbl not found"
 	@echo "Project structure check complete"
 
 # Show help
@@ -121,23 +152,22 @@ help:
 	@echo "=============================================="
 	@echo ""
 	@echo "Available targets:"
-	@echo "  all         - Build release version (default)"
-	@echo "  release     - Build optimized release version"
-	@echo "  debug       - Build debug version with symbols"
-	@echo "  clean       - Remove all build artifacts"
-	@echo "  run         - Build and run the program with SF-10 data"
-	@echo "  run-sf1     - Build and run with SF-1 dataset"
-	@echo "  run-sf10    - Build and run with SF-10 dataset"
-	@echo "  install     - Install to /usr/local/bin"
-	@echo "  uninstall   - Remove from /usr/local/bin"
-	@echo "  check       - Verify project structure"
-	@echo "  help        - Show this help message"
+	@echo "  run-sf1           - Build and run with SF-1 dataset"
+	@echo "  run-sf10          - Build and run with SF-10 dataset"
+	@echo "  run-q1            - Run TPC-H Query 1 benchmark only"
+	@echo "  run-q3            - Run TPC-H Query 3 benchmark only"
+	@echo "  run-q6            - Run TPC-H Query 6 benchmark only"
+	@echo "  run-q9            - Run TPC-H Query 9 benchmark only"
+	@echo "  run-q13           - Run TPC-H Query 13 benchmark only"
+	@echo "  clean             - Remove all build artifacts"
+	@echo "  check             - Verify project structure"
+	@echo "  help              - Show this help message"
 	@echo ""
 	@echo "Examples:"
-	@echo "  make              # Build release version"
-	@echo "  make debug        # Build debug version"
-	@echo "  make run          # Build and run"
+	@echo "  make run-q1       # Run only TPC-H Query 1"
+	@echo "  make run-q3       # Run only TPC-H Query 3"
 	@echo "  make clean        # Clean build files"
+	@echo "  make check        # Verify all files exist"
 
 # Show project info
 .PHONY: info
@@ -151,6 +181,15 @@ info:
 	@echo "Compiler: $(CXX)"
 	@echo "C++ Standard: C++20"
 	@echo "Frameworks: Metal, Foundation, QuartzCore"
+	@echo ""
+	@echo "Supported TPC-H Queries:"
+	@echo "  Q1  - Pricing Summary Report Query"
+	@echo "  Q3  - Shipping Priority Query"
+	@echo "  Q6  - Forecasting Revenue Change Query"
+	@echo "  Q9  - Product Type Profit Measure Query"
+	@echo "  Q13 - Customer Distribution Query"
+	@echo ""
+	@echo "Available datasets: SF-1, SF-10"
 
 # Print variables (for debugging the Makefile)
 .PHONY: print-vars
@@ -166,9 +205,23 @@ print-vars:
 .PHONY: rebuild
 rebuild: clean all
 
+# Compile only (no linking)
+.PHONY: compile
+compile: $(OBJECTS)
+	@echo "Compilation complete"
+
+# Quick test build (just compile, don't run)
+.PHONY: test-build
+test-build: compile
+	@echo "Test build successful - source compiles without errors"
+
+# Build target (same as all, kept for compatibility)
+.PHONY: build
+build: $(TARGET)
+
 # Create a distributable package
 .PHONY: package
-package: release
+package: $(TARGET)
 	@echo "Creating distribution package..."
 	@mkdir -p dist/$(PROJECT_NAME)
 	@cp $(TARGET) dist/$(PROJECT_NAME)/

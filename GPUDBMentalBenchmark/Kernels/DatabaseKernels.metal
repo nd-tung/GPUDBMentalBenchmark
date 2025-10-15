@@ -607,8 +607,6 @@ LIMIT 10;
 //}
 
 
-// --- TPC-H Query 3 Kernels ---
-
 // Struct for the final aggregation results for Q3
 struct Q3Aggregates {
     atomic_int key; // orderkey
@@ -627,7 +625,7 @@ struct Q3Aggregates_Local {
 
 
 // KERNEL 1: Build a hash table on the CUSTOMER table.
-// Filters for c_mktsegment = 'BUILDING' during the build.
+// (No changes needed, this kernel is correct)
 kernel void q3_build_customer_ht_kernel(
     const device int* c_custkey,
     const device char* c_mktsegment,
@@ -655,14 +653,11 @@ kernel void q3_build_customer_ht_kernel(
 }
 
 
-// KERNEL 2: Build a hash table on the ORDERS table.
-// Filters for o_orderdate < '1995-03-15' during the build.
-// The 'value' will store the packed date and priority.
+// KERNEL 2: Build a hash table on the ORDERS table. (CORRECTED)
+// Now stores the original row index as the payload.
 kernel void q3_build_orders_ht_kernel(
     const device int* o_orderkey,
-    const device int* o_custkey,
     const device int* o_orderdate,
-    const device int* o_shippriority,
     device HashTableEntry* orders_ht,
     constant uint& orders_size,
     constant uint& orders_ht_size,
@@ -674,7 +669,7 @@ kernel void q3_build_orders_ht_kernel(
     }
     
     int key = o_orderkey[index];
-    int value = o_custkey[index]; // The value we need for the next join is the custkey
+    int value = (int)index; // Store the original row index as the payload
 
     uint hash_index = (uint)key % orders_ht_size;
     for (uint i = 0; i < orders_ht_size; ++i) {
@@ -682,40 +677,34 @@ kernel void q3_build_orders_ht_kernel(
         int expected = -1;
         if (atomic_compare_exchange_weak_explicit(&orders_ht[probe_index].key, &expected, key, memory_order_relaxed, memory_order_relaxed)) {
             atomic_store_explicit(&orders_ht[probe_index].value, value, memory_order_relaxed);
-            // We also need to pass date/priority to the final result, we'll look it up later.
             return;
         }
     }
 }
 
 
-// KERNEL 3: The main kernel. Streams lineitem, probes two hash tables,
-// and performs a local group-by aggregation.
+// KERNEL 3: Main Probe & Aggregation Kernel (CORRECTED)
+// Now correctly looks up the date and priority using the index payload.
 kernel void q3_probe_and_local_agg_kernel(
-    // Input columns from lineitem
     const device int* l_orderkey,
     const device int* l_shipdate,
     const device float* l_extendedprice,
     const device float* l_discount,
-    // Pre-built hash tables
     const device HashTableEntry* customer_ht,
     const device HashTableEntry* orders_ht,
-    // We still need the full orders table to look up date/priority
+    // Pass the full original arrays for payload lookup
+    const device int* o_custkey,
     const device int* o_orderdate,
     const device int* o_shippriority,
-    // Output buffer
     device Q3Aggregates_Local* intermediate_results,
-    // Parameters
     constant uint& lineitem_size,
     constant uint& customer_ht_size,
     constant uint& orders_ht_size,
-    constant int& cutoff_date, // 19950315
-    // Thread IDs
+    constant int& cutoff_date,
     uint group_id [[threadgroup_position_in_grid]],
     uint thread_id_in_group [[thread_index_in_threadgroup]],
     uint threads_per_group [[threads_per_threadgroup]])
 {
-    // 1. Create and initialize a private hash table for this threadgroup.
     const int local_ht_size = 64;
     thread Q3Aggregates_Local local_ht[local_ht_size];
     for (int i = thread_id_in_group; i < local_ht_size; i += threads_per_group) {
@@ -724,31 +713,29 @@ kernel void q3_probe_and_local_agg_kernel(
     }
     threadgroup_barrier(mem_flags::mem_threadgroup);
 
-    // 2. Each thread processes its assigned rows from lineitem.
-    uint grid_size = threads_per_group * 2048; // Assume 2048 groups
+    uint grid_size = threads_per_group * 2048;
     for (uint i = (group_id * threads_per_group) + thread_id_in_group; i < lineitem_size; i += grid_size) {
         
-        if (l_shipdate[i] <= cutoff_date) continue; // Filter: l_shipdate > '1995-03-15'
+        if (l_shipdate[i] <= cutoff_date) continue;
 
         int orderkey = l_orderkey[i];
         
-        // --- Probe orders hash table ---
         uint o_hash = (uint)orderkey % orders_ht_size;
-        int custkey = -1;
+        int orders_idx = -1;
         
         for (uint j = 0; j < orders_ht_size; ++j) {
             uint probe_idx = (o_hash + j) % orders_ht_size;
             int o_key = atomic_load_explicit(&orders_ht[probe_idx].key, memory_order_relaxed);
             if (o_key == orderkey) {
-                custkey = atomic_load_explicit(&orders_ht[probe_idx].value, memory_order_relaxed);
+                orders_idx = atomic_load_explicit(&orders_ht[probe_idx].value, memory_order_relaxed);
                 break;
             }
             if (o_key == -1) break;
         }
 
-        if (custkey == -1) continue; // Join with orders failed
+        if (orders_idx == -1) continue;
 
-        // --- Probe customer hash table ---
+        int custkey = o_custkey[orders_idx];
         uint c_hash = (uint)custkey % customer_ht_size;
         bool customer_match = false;
         for (uint j = 0; j < customer_ht_size; ++j) {
@@ -761,9 +748,8 @@ kernel void q3_probe_and_local_agg_kernel(
             if (c_key == -1) break;
         }
 
-        if (!customer_match) continue; // Join with customer failed
+        if (!customer_match) continue;
         
-        // --- Aggregate in local hash table ---
         float revenue = l_extendedprice[i] * (1.0f - l_discount[i]);
         uint agg_hash = (uint)orderkey % local_ht_size;
 
@@ -772,17 +758,16 @@ kernel void q3_probe_and_local_agg_kernel(
             if(local_ht[probe_idx].key == -1 || local_ht[probe_idx].key == orderkey) {
                 local_ht[probe_idx].key = orderkey;
                 local_ht[probe_idx].revenue += revenue;
-                // Since orderkey is unique in the orders table, we can just set these.
-                // A better approach would be to use a map from orderkey to its original index.
-                local_ht[probe_idx].orderdate = 19950314; // Placeholder
-                local_ht[probe_idx].shippriority = 0; // Placeholder
+                // CORRECTLY look up the date and priority from the original arrays
+                local_ht[probe_idx].orderdate = (uint)o_orderdate[orders_idx];
+                local_ht[probe_idx].shippriority = (uint)o_shippriority[orders_idx];
                 break;
             }
         }
     }
     threadgroup_barrier(mem_flags::mem_threadgroup);
 
-    // 3. Write local results to global memory
+    // Write local results to global memory
     for (int i = thread_id_in_group; i < local_ht_size; i += threads_per_group) {
         if (local_ht[i].key != -1) {
             intermediate_results[group_id * local_ht_size + i] = local_ht[i];
@@ -790,7 +775,8 @@ kernel void q3_probe_and_local_agg_kernel(
     }
 }
 
-// KERNEL 4: The final merge kernel (your version was correct and can be reused)
+
+// KERNEL 4: The final merge kernel (No changes needed)
 kernel void q3_merge_results_kernel(
     const device Q3Aggregates_Local* intermediate_results,
     device Q3Aggregates* final_hashtable,
@@ -810,14 +796,12 @@ kernel void q3_merge_results_kernel(
         
         int expected = -1;
         if (atomic_compare_exchange_weak_explicit(&final_hashtable[probe_index].key, &expected, local_result.key, memory_order_relaxed, memory_order_relaxed)) {
-            // Initialize new entry
             atomic_store_explicit(&final_hashtable[probe_index].revenue, 0.0f, memory_order_relaxed);
-            atomic_store_explicit(&final_hashtable[probe_index].orderdate, (uint)local_result.orderdate, memory_order_relaxed);
-            atomic_store_explicit(&final_hashtable[probe_index].shippriority, (uint)local_result.shippriority, memory_order_relaxed);
+            atomic_store_explicit(&final_hashtable[probe_index].orderdate, local_result.orderdate, memory_order_relaxed);
+            atomic_store_explicit(&final_hashtable[probe_index].shippriority, local_result.shippriority, memory_order_relaxed);
         }
         
         if (atomic_load_explicit(&final_hashtable[probe_index].key, memory_order_relaxed) == local_result.key) {
-            // Accumulate revenue
             atomic_fetch_add_explicit(&final_hashtable[probe_index].revenue, local_result.revenue, memory_order_relaxed);
             return;
         }

@@ -539,6 +539,7 @@ void runQ1Benchmark(MTL::Device* device, MTL::CommandQueue* commandQueue, MTL::L
 }
 
 
+
 // C++ structs for reading final results
 struct Q3Result {
     int orderkey;
@@ -560,7 +561,7 @@ void runQ3Benchmark(MTL::Device* pDevice, MTL::CommandQueue* pCommandQueue, MTL:
     std::cout << "\n--- Running TPC-H Query 3 Benchmark ---" << std::endl;
 
     // 1. Load data for all three tables
-    const std::string sf_path = "Data/SF-10/";
+    const std::string sf_path = "Data/SF-1/";
     auto c_custkey = loadIntColumn(sf_path + "customer.tbl", 0);
     auto c_mktsegment = loadCharColumn(sf_path + "customer.tbl", 6);
 
@@ -594,14 +595,12 @@ void runQ3Benchmark(MTL::Device* pDevice, MTL::CommandQueue* pCommandQueue, MTL:
     MTL::ComputePipelineState* pMergePipe = pDevice->newComputePipelineState(pMergeFn, &pError);
 
     // 3. Create Buffers
-    // Customer build buffers
     const uint customer_ht_size = customer_size * 2;
     std::vector<int> cpu_customer_ht(customer_ht_size * 2, -1);
     MTL::Buffer* pCustKeyBuffer = pDevice->newBuffer(c_custkey.data(), customer_size * sizeof(int), MTL::ResourceStorageModeShared);
     MTL::Buffer* pCustMktBuffer = pDevice->newBuffer(c_mktsegment.data(), customer_size * sizeof(char), MTL::ResourceStorageModeShared);
     MTL::Buffer* pCustomerHTBuffer = pDevice->newBuffer(cpu_customer_ht.data(), customer_ht_size * sizeof(int) * 2, MTL::ResourceStorageModeShared);
 
-    // Orders build buffers
     const uint orders_ht_size = orders_size * 2;
     std::vector<int> cpu_orders_ht(orders_ht_size * 2, -1);
     MTL::Buffer* pOrdKeyBuffer = pDevice->newBuffer(o_orderkey.data(), orders_size * sizeof(int), MTL::ResourceStorageModeShared);
@@ -610,27 +609,24 @@ void runQ3Benchmark(MTL::Device* pDevice, MTL::CommandQueue* pCommandQueue, MTL:
     MTL::Buffer* pOrdPrioBuffer = pDevice->newBuffer(o_shippriority.data(), orders_size * sizeof(int), MTL::ResourceStorageModeShared);
     MTL::Buffer* pOrdersHTBuffer = pDevice->newBuffer(cpu_orders_ht.data(), orders_ht_size * sizeof(int) * 2, MTL::ResourceStorageModeShared);
     
-    // Lineitem probe buffers
     MTL::Buffer* pLineOrdKeyBuffer = pDevice->newBuffer(l_orderkey.data(), lineitem_size * sizeof(int), MTL::ResourceStorageModeShared);
     MTL::Buffer* pLineShipDateBuffer = pDevice->newBuffer(l_shipdate.data(), lineitem_size * sizeof(int), MTL::ResourceStorageModeShared);
     MTL::Buffer* pLinePriceBuffer = pDevice->newBuffer(l_extendedprice.data(), lineitem_size * sizeof(float), MTL::ResourceStorageModeShared);
     MTL::Buffer* pLineDiscBuffer = pDevice->newBuffer(l_discount.data(), lineitem_size * sizeof(float), MTL::ResourceStorageModeShared);
     
-    // Intermediate and final result buffers
     const uint num_threadgroups = 2048;
     const uint local_ht_size = 64;
     const uint intermediate_size = num_threadgroups * local_ht_size;
     MTL::Buffer* pIntermediateBuffer = pDevice->newBuffer(intermediate_size * sizeof(Q3Aggregates_CPU), MTL::ResourceStorageModeShared);
 
-    const uint final_ht_size = orders_size; // Can be large
+    const uint final_ht_size = orders_size;
     std::vector<int> cpu_final_ht(final_ht_size * (sizeof(Q3Aggregates_CPU)/sizeof(int)), -1);
     MTL::Buffer* pFinalHTBuffer = pDevice->newBuffer(cpu_final_ht.data(), final_ht_size * sizeof(Q3Aggregates_CPU), MTL::ResourceStorageModeShared);
 
-    // 4. Dispatch full pipeline in a single command buffer
+    // 4. Dispatch full pipeline
     MTL::CommandBuffer* pCommandBuffer = pCommandQueue->commandBuffer();
     const int cutoff_date = 19950315;
 
-    // --- Stage 1: Build Customer HT ---
     MTL::ComputeCommandEncoder* pCustBuildEncoder = pCommandBuffer->computeCommandEncoder();
     pCustBuildEncoder->setComputePipelineState(pCustBuildPipe);
     pCustBuildEncoder->setBuffer(pCustKeyBuffer, 0, 0);
@@ -641,21 +637,17 @@ void runQ3Benchmark(MTL::Device* pDevice, MTL::CommandQueue* pCommandQueue, MTL:
     pCustBuildEncoder->dispatchThreads(MTL::Size(customer_size, 1, 1), MTL::Size(1024, 1, 1));
     pCustBuildEncoder->endEncoding();
 
-    // --- Stage 2: Build Orders HT ---
     MTL::ComputeCommandEncoder* pOrdersBuildEncoder = pCommandBuffer->computeCommandEncoder();
     pOrdersBuildEncoder->setComputePipelineState(pOrdersBuildPipe);
     pOrdersBuildEncoder->setBuffer(pOrdKeyBuffer, 0, 0);
-    pOrdersBuildEncoder->setBuffer(pOrdCustKeyBuffer, 0, 1);
-    pOrdersBuildEncoder->setBuffer(pOrdDateBuffer, 0, 2);
-    pOrdersBuildEncoder->setBuffer(pOrdPrioBuffer, 0, 3);
-    pOrdersBuildEncoder->setBuffer(pOrdersHTBuffer, 0, 4);
-    pOrdersBuildEncoder->setBytes(&orders_size, sizeof(orders_size), 5);
-    pOrdersBuildEncoder->setBytes(&orders_ht_size, sizeof(orders_ht_size), 6);
-    pOrdersBuildEncoder->setBytes(&cutoff_date, sizeof(cutoff_date), 7);
+    pOrdersBuildEncoder->setBuffer(pOrdDateBuffer, 0, 1);
+    pOrdersBuildEncoder->setBuffer(pOrdersHTBuffer, 0, 2);
+    pOrdersBuildEncoder->setBytes(&orders_size, sizeof(orders_size), 3);
+    pOrdersBuildEncoder->setBytes(&orders_ht_size, sizeof(orders_ht_size), 4);
+    pOrdersBuildEncoder->setBytes(&cutoff_date, sizeof(cutoff_date), 5);
     pOrdersBuildEncoder->dispatchThreads(MTL::Size(orders_size, 1, 1), MTL::Size(1024, 1, 1));
     pOrdersBuildEncoder->endEncoding();
 
-    // --- Stage 3: Probe & Local Aggregate ---
     MTL::ComputeCommandEncoder* pProbeAggEncoder = pCommandBuffer->computeCommandEncoder();
     pProbeAggEncoder->setComputePipelineState(pProbeAggPipe);
     pProbeAggEncoder->setBuffer(pLineOrdKeyBuffer, 0, 0);
@@ -664,17 +656,17 @@ void runQ3Benchmark(MTL::Device* pDevice, MTL::CommandQueue* pCommandQueue, MTL:
     pProbeAggEncoder->setBuffer(pLineDiscBuffer, 0, 3);
     pProbeAggEncoder->setBuffer(pCustomerHTBuffer, 0, 4);
     pProbeAggEncoder->setBuffer(pOrdersHTBuffer, 0, 5);
-    pProbeAggEncoder->setBuffer(pOrdDateBuffer, 0, 6); // Pass full arrays for lookup
-    pProbeAggEncoder->setBuffer(pOrdPrioBuffer, 0, 7);
-    pProbeAggEncoder->setBuffer(pIntermediateBuffer, 0, 8);
-    pProbeAggEncoder->setBytes(&lineitem_size, sizeof(lineitem_size), 9);
-    pProbeAggEncoder->setBytes(&customer_ht_size, sizeof(customer_ht_size), 10);
-    pProbeAggEncoder->setBytes(&orders_ht_size, sizeof(orders_ht_size), 11);
-    pProbeAggEncoder->setBytes(&cutoff_date, sizeof(cutoff_date), 12);
+    pProbeAggEncoder->setBuffer(pOrdCustKeyBuffer, 0, 6);
+    pProbeAggEncoder->setBuffer(pOrdDateBuffer, 0, 7);
+    pProbeAggEncoder->setBuffer(pOrdPrioBuffer, 0, 8);
+    pProbeAggEncoder->setBuffer(pIntermediateBuffer, 0, 9);
+    pProbeAggEncoder->setBytes(&lineitem_size, sizeof(lineitem_size), 10);
+    pProbeAggEncoder->setBytes(&customer_ht_size, sizeof(customer_ht_size), 11);
+    pProbeAggEncoder->setBytes(&orders_ht_size, sizeof(orders_ht_size), 12);
+    pProbeAggEncoder->setBytes(&cutoff_date, sizeof(cutoff_date), 13);
     pProbeAggEncoder->dispatchThreadgroups(MTL::Size(num_threadgroups, 1, 1), MTL::Size(1024, 1, 1));
     pProbeAggEncoder->endEncoding();
     
-    // --- Stage 4: Merge ---
     MTL::ComputeCommandEncoder* pMergeEncoder = pCommandBuffer->computeCommandEncoder();
     pMergeEncoder->setComputePipelineState(pMergePipe);
     pMergeEncoder->setBuffer(pIntermediateBuffer, 0, 0);
@@ -698,7 +690,6 @@ void runQ3Benchmark(MTL::Device* pDevice, MTL::CommandQueue* pCommandQueue, MTL:
         }
     }
     
-    // Sort by revenue descending
     std::sort(final_results.begin(), final_results.end(), [](const Q3Result& a, const Q3Result& b) {
         return a.revenue > b.revenue;
     });
@@ -715,7 +706,7 @@ void runQ3Benchmark(MTL::Device* pDevice, MTL::CommandQueue* pCommandQueue, MTL:
     printf("Total results found: %lu\n", final_results.size());
     printf("Total TPC-H Q3 GPU time: %f ms\n", gpuExecutionTime * 1000.0);
     
-    // Cleanup
+    //Cleanup
     pCustBuildFn->release();
     pCustBuildPipe->release();
     pOrdersBuildFn->release();
@@ -724,7 +715,7 @@ void runQ3Benchmark(MTL::Device* pDevice, MTL::CommandQueue* pCommandQueue, MTL:
     pProbeAggPipe->release();
     pMergeFn->release();
     pMergePipe->release();
-    
+
     pCustKeyBuffer->release();
     pCustMktBuffer->release();
     pCustomerHTBuffer->release();
@@ -1251,8 +1242,40 @@ void runQ13Benchmark(MTL::Device* pDevice, MTL::CommandQueue* pCommandQueue, MTL
 }
 
 
+void showHelp() {
+    std::cout << "GPU Database Mental Benchmark" << std::endl;
+    std::cout << "Usage: GPUDBMentalBenchmark [query]" << std::endl;
+    std::cout << "" << std::endl;
+    std::cout << "Available queries:" << std::endl;
+    std::cout << "  all           - Run all benchmarks (default)" << std::endl;
+    std::cout << "  selection     - Run selection benchmark" << std::endl;
+    std::cout << "  aggregation   - Run aggregation benchmark" << std::endl;
+    std::cout << "  join          - Run join benchmark" << std::endl;
+    std::cout << "  q1            - Run TPC-H Query 1 (Pricing Summary Report)" << std::endl;
+    std::cout << "  q3            - Run TPC-H Query 3 (Shipping Priority)" << std::endl;
+    std::cout << "  q6            - Run TPC-H Query 6 (Forecasting Revenue Change)" << std::endl;
+    std::cout << "  q9            - Run TPC-H Query 9 (Product Type Profit Measure)" << std::endl;
+    std::cout << "  q13           - Run TPC-H Query 13 (Customer Distribution)" << std::endl;
+    std::cout << "  help          - Show this help message" << std::endl;
+    std::cout << "" << std::endl;
+    std::cout << "Examples:" << std::endl;
+    std::cout << "  GPUDBMentalBenchmark        # Run all benchmarks" << std::endl;
+    std::cout << "  GPUDBMentalBenchmark q1     # Run only TPC-H Query 1" << std::endl;
+    std::cout << "  GPUDBMentalBenchmark q3     # Run only TPC-H Query 3" << std::endl;
+}
+
 // --- Main Entry Point ---
 int main(int argc, const char * argv[]) {
+    // Parse command line arguments
+    std::string query = "all"; // default to running all benchmarks
+    if (argc > 1) {
+        query = std::string(argv[1]);
+        if (query == "help" || query == "--help" || query == "-h") {
+            showHelp();
+            return 0;
+        }
+    }
+
     NS::AutoreleasePool* pAutoreleasePool = NS::AutoreleasePool::alloc()->init();
     
     MTL::Device* device = MTL::CreateSystemDefaultDevice();
@@ -1271,19 +1294,48 @@ int main(int argc, const char * argv[]) {
             if (error) {
                 std::cerr << "Error details: " << error->localizedDescription()->utf8String() << std::endl;
             }
+            pAutoreleasePool->release();
             return 1;
         }
     }
 
-    // Run all benchmarks
-    // runSelectionBenchmark(device, commandQueue, library);
-    // runAggregationBenchmark(device, commandQueue, library);
-    // runJoinBenchmark(device, commandQueue, library);
-    // runQ1Benchmark(device, commandQueue, library);
-    // runQ3Benchmark(device, commandQueue, library);
-    // runQ6Benchmark(device, commandQueue, library);
-    //runQ9Benchmark(device, commandQueue, library);
-    runQ13Benchmark(device, commandQueue, library);
+    // Run benchmarks based on command line argument
+    if (query == "all") {
+        // Run all benchmarks
+        runSelectionBenchmark(device, commandQueue, library);
+        runAggregationBenchmark(device, commandQueue, library);
+        runJoinBenchmark(device, commandQueue, library);
+        runQ1Benchmark(device, commandQueue, library);
+        runQ3Benchmark(device, commandQueue, library);
+        runQ6Benchmark(device, commandQueue, library);
+        runQ9Benchmark(device, commandQueue, library);
+        runQ13Benchmark(device, commandQueue, library);
+    } else if (query == "selection") {
+        runSelectionBenchmark(device, commandQueue, library);
+    } else if (query == "aggregation") {
+        runAggregationBenchmark(device, commandQueue, library);
+    } else if (query == "join") {
+        runJoinBenchmark(device, commandQueue, library);
+    } else if (query == "q1") {
+        runQ1Benchmark(device, commandQueue, library);
+    } else if (query == "q3") {
+        runQ3Benchmark(device, commandQueue, library);
+    } else if (query == "q6") {
+        runQ6Benchmark(device, commandQueue, library);
+    } else if (query == "q9") {
+        runQ9Benchmark(device, commandQueue, library);
+    } else if (query == "q13") {
+        runQ13Benchmark(device, commandQueue, library);
+    } else {
+        std::cerr << "Unknown query: " << query << std::endl;
+        std::cerr << "Use 'help' to see available options." << std::endl;
+        // Cleanup and exit
+        library->release();
+        commandQueue->release();
+        device->release();
+        pAutoreleasePool->release();
+        return 1;
+    }
     
     // Cleanup
     library->release();
