@@ -1110,3 +1110,211 @@ kernel void q9_merge_results_kernel(
         }
     }
 }
+
+// --- TPC-H Query 13 Kernels ---
+/*
+SELECT
+    c_count,
+    COUNT(*) AS custdist
+FROM (
+    -- Inner Query: First, for each customer, count their non-special orders.
+    SELECT
+        c_custkey,
+        COUNT(o_orderkey) AS c_count
+    FROM
+        customer
+    LEFT OUTER JOIN
+        orders ON c_custkey = o_custkey
+        AND o_comment NOT LIKE '%special%requests%'
+    GROUP BY
+        c_custkey
+) AS c_orders
+-- Outer Query: Then, group those results again to create a histogram.
+GROUP BY
+    c_count
+ORDER BY
+    custdist DESC,
+    c_count DESC;
+
+*/
+
+// Structs for the two levels of aggregation
+struct Q13_OrderCount { // Stage 1 result
+    atomic_uint custkey;
+    atomic_uint order_count;
+};
+struct Q13_OrderCount_Local {
+    uint custkey;
+    uint order_count;
+};
+
+struct Q13_CustDist { // Stage 2 final result
+    atomic_uint c_count; // The number of orders
+    atomic_uint custdist; // The number of customers with that many orders
+};
+struct Q13_CustDist_Local {
+    uint c_count;
+    uint custdist;
+};
+
+
+// KERNEL 1A: Stage 1, Local Count. Scans ORDERS, filters, and does first GROUP BY locally.
+kernel void q13_local_count_kernel(
+    const device int* o_custkey,
+    const device char* o_comment, // Assuming fixed-width
+    device Q13_OrderCount_Local* intermediate_counts,
+    constant uint& orders_size,
+    uint group_id [[threadgroup_position_in_grid]],
+    uint thread_id_in_group [[thread_index_in_threadgroup]],
+    uint threads_per_group [[threads_per_threadgroup]])
+{
+    const int local_ht_size = 128;
+    thread Q13_OrderCount_Local local_ht[local_ht_size];
+    for (int i = thread_id_in_group; i < local_ht_size; i += threads_per_group) {
+        local_ht[i].custkey = 0; // 0 is invalid key
+        local_ht[i].order_count = 0;
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+
+    uint grid_size = threads_per_group * 2048; // Assume 2048 groups
+    for (uint i = (group_id * threads_per_group) + thread_id_in_group; i < orders_size; i += grid_size) {
+        
+        // Filter: o_comment NOT LIKE '%special%requests%'
+        bool match = false;
+        // Simplified search for "special"
+        for(int j = 0; j < 90; ++j) { // O_COMMENT is 100 chars
+            if (o_comment[i * 100 + j] == 's' && o_comment[i * 100 + j + 7] == 'l') { // quick check
+                match = true; // Found "special", so we should SKIP this row
+                break;
+            }
+        }
+        if (match) continue;
+
+        // Passed filter, aggregate locally
+        uint custkey = (uint)o_custkey[i];
+        uint hash_index = custkey % local_ht_size;
+        for (int k = 0; k < local_ht_size; ++k) {
+            uint probe_idx = (hash_index + k) % local_ht_size;
+            if (local_ht[probe_idx].custkey == 0 || local_ht[probe_idx].custkey == custkey) {
+                local_ht[probe_idx].custkey = custkey;
+                local_ht[probe_idx].order_count++;
+                break;
+            }
+        }
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    
+    // Write local results to global memory
+    for (int i = thread_id_in_group; i < local_ht_size; i += threads_per_group) {
+        if (local_ht[i].custkey != 0) {
+            intermediate_counts[group_id * local_ht_size + i] = local_ht[i];
+        }
+    }
+}
+
+
+// KERNEL 1B: Stage 1, Merge Count. Merges partial counts into a global HT.
+kernel void q13_merge_counts_kernel(
+    const device Q13_OrderCount_Local* intermediate_counts,
+    device Q13_OrderCount* customer_order_counts_ht,
+    constant uint& intermediate_size,
+    constant uint& final_ht_size,
+    uint index [[thread_position_in_grid]])
+{
+    if (index >= intermediate_size) return;
+    Q13_OrderCount_Local local_result = intermediate_counts[index];
+    if (local_result.custkey == 0) return;
+
+    uint hash_index = local_result.custkey % final_ht_size;
+    for (uint i = 0; i < final_ht_size; ++i) {
+        uint probe_index = (hash_index + i) % final_ht_size;
+        uint expected = 0;
+        if (atomic_compare_exchange_weak_explicit(&customer_order_counts_ht[probe_index].custkey, &expected, local_result.custkey, memory_order_relaxed, memory_order_relaxed)) {
+            atomic_store_explicit(&customer_order_counts_ht[probe_index].order_count, 0, memory_order_relaxed);
+        }
+        if (atomic_load_explicit(&customer_order_counts_ht[probe_index].custkey, memory_order_relaxed) == local_result.custkey) {
+            atomic_fetch_add_explicit(&customer_order_counts_ht[probe_index].order_count, local_result.order_count, memory_order_relaxed);
+            return;
+        }
+    }
+}
+
+
+// KERNEL 2A: Stage 2, Local Histogram. Scans CUSTOMER, probes counts HT, builds local histogram.
+kernel void q13_local_histogram_kernel(
+    const device int* c_custkey,
+    const device Q13_OrderCount* customer_order_counts_ht,
+    device Q13_CustDist_Local* intermediate_histograms,
+    constant uint& customer_size,
+    constant uint& counts_ht_size,
+    uint group_id [[threadgroup_position_in_grid]],
+    uint thread_id_in_group [[thread_index_in_threadgroup]],
+    uint threads_per_group [[threads_per_threadgroup]])
+{
+    const int local_ht_size = 32; // Max expected order count is small
+    thread Q13_CustDist_Local local_ht[local_ht_size];
+    for (int i = thread_id_in_group; i < local_ht_size; i += threads_per_group) {
+        local_ht[i].c_count = i;
+        local_ht[i].custdist = 0;
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+
+    uint grid_size = threads_per_group * 2048;
+    for (uint i = (group_id * threads_per_group) + thread_id_in_group; i < customer_size; i += grid_size) {
+        uint custkey = (uint)c_custkey[i];
+        
+        // Probe the counts HT to find this customer's order count
+        uint hash_index = custkey % counts_ht_size;
+        uint order_count = 0; // Default to 0 for LEFT JOIN
+        for (uint j = 0; j < counts_ht_size; ++j) {
+            uint probe_idx = (hash_index + j) % counts_ht_size;
+            uint ht_key = atomic_load_explicit(&customer_order_counts_ht[probe_idx].custkey, memory_order_relaxed);
+            if (ht_key == custkey) {
+                order_count = atomic_load_explicit(&customer_order_counts_ht[probe_idx].order_count, memory_order_relaxed);
+                break;
+            }
+            if (ht_key == 0) break; // Reached empty slot
+        }
+        
+        // Update local histogram
+        if (order_count < local_ht_size) {
+            local_ht[order_count].custdist++;
+        }
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    
+    for (int i = thread_id_in_group; i < local_ht_size; i += threads_per_group) {
+        if (local_ht[i].custdist > 0) {
+            intermediate_histograms[group_id * local_ht_size + i] = local_ht[i];
+        }
+    }
+}
+
+
+// KERNEL 2B: Stage 2, Merge Histogram. Merges partial histograms into final result.
+kernel void q13_merge_histogram_kernel(
+    const device Q13_CustDist_Local* intermediate_histograms,
+    device Q13_CustDist* final_histogram_ht,
+    constant uint& intermediate_size,
+    constant uint& final_ht_size,
+    uint index [[thread_position_in_grid]])
+{
+    if (index >= intermediate_size) return;
+    Q13_CustDist_Local local_result = intermediate_histograms[index];
+    if (local_result.custdist == 0) return;
+
+    uint c_count = local_result.c_count;
+    uint hash_index = c_count % final_ht_size;
+
+    for (uint i = 0; i < final_ht_size; ++i) {
+        uint probe_index = (hash_index + i) % final_ht_size;
+        uint expected = -1; // Use -1 as empty marker
+        if (atomic_compare_exchange_weak_explicit(&final_histogram_ht[probe_index].c_count, &expected, c_count, memory_order_relaxed, memory_order_relaxed)) {
+            atomic_store_explicit(&final_histogram_ht[probe_index].custdist, 0, memory_order_relaxed);
+        }
+        if (atomic_load_explicit(&final_histogram_ht[probe_index].c_count, memory_order_relaxed) == c_count) {
+            atomic_fetch_add_explicit(&final_histogram_ht[probe_index].custdist, local_result.custdist, memory_order_relaxed);
+            return;
+        }
+    }
+}

@@ -1111,6 +1111,146 @@ void runQ9Benchmark(MTL::Device* pDevice, MTL::CommandQueue* pCommandQueue, MTL:
     pFinalHTBuffer->release();
 }
 
+
+// C++ structs for reading final Q13 results
+struct Q13_OrderCount_CPU {
+    int custkey;
+    uint order_count;
+};
+
+struct Q13_CustDist_CPU {
+    int c_count;
+    uint custdist;
+};
+
+struct Q13Result {
+    uint c_count;
+    uint custdist;
+};
+
+
+// --- Main Function for TPC-H Q13 Benchmark ---
+void runQ13Benchmark(MTL::Device* pDevice, MTL::CommandQueue* pCommandQueue, MTL::Library* pLibrary) {
+    std::cout << "\n--- Running TPC-H Query 13 Benchmark ---" << std::endl;
+
+    const std::string sf_path = "Data/SF-1/";
+    
+    // 1. Load data
+    auto o_custkey = loadIntColumn(sf_path + "orders.tbl", 1);
+    auto o_comment = loadCharColumn(sf_path + "orders.tbl", 8, 100);
+    auto c_custkey = loadIntColumn(sf_path + "customer.tbl", 0);
+
+    const uint orders_size = (uint)o_custkey.size();
+    const uint customer_size = (uint)c_custkey.size();
+    std::cout << "Loaded " << orders_size << " orders and " << customer_size << " customers." << std::endl;
+
+    // 2. Setup kernels
+    NS::Error* pError = nullptr;
+    MTL::Function* pLocalCountFn = pLibrary->newFunction(NS::String::string("q13_local_count_kernel", NS::UTF8StringEncoding));
+    MTL::ComputePipelineState* pLocalCountPipe = pDevice->newComputePipelineState(pLocalCountFn, &pError);
+    MTL::Function* pMergeCountFn = pLibrary->newFunction(NS::String::string("q13_merge_counts_kernel", NS::UTF8StringEncoding));
+    MTL::ComputePipelineState* pMergeCountPipe = pDevice->newComputePipelineState(pMergeCountFn, &pError);
+    MTL::Function* pLocalHistFn = pLibrary->newFunction(NS::String::string("q13_local_histogram_kernel", NS::UTF8StringEncoding));
+    MTL::ComputePipelineState* pLocalHistPipe = pDevice->newComputePipelineState(pLocalHistFn, &pError);
+    // NOTE: We no longer need the q13_merge_histogram_kernel pipeline state
+
+    // 3. Create Buffers
+    const uint num_threadgroups = 2048;
+    MTL::Buffer* pOrdCustKeyBuffer = pDevice->newBuffer(o_custkey.data(), orders_size * sizeof(int), MTL::ResourceStorageModeShared);
+    MTL::Buffer* pOrdCommentBuffer = pDevice->newBuffer(o_comment.data(), o_comment.size() * sizeof(char), MTL::ResourceStorageModeShared);
+    
+    const uint inter_count_size = num_threadgroups * 128;
+    MTL::Buffer* pInterCountsBuffer = pDevice->newBuffer(inter_count_size * sizeof(Q13_OrderCount_CPU), MTL::ResourceStorageModeShared);
+    
+    const uint final_count_ht_size = customer_size * 2; // Larger to reduce collisions
+    // CORRECTED INITIALIZATION: Use 0 to match the merge kernel's expectation for an empty key
+    std::vector<uint> cpu_final_counts_ht(final_count_ht_size * (sizeof(Q13_OrderCount_CPU)/sizeof(uint)), 0);
+    MTL::Buffer* pFinalCountsHTBuffer = pDevice->newBuffer(cpu_final_counts_ht.data(), final_count_ht_size * sizeof(Q13_OrderCount_CPU), MTL::ResourceStorageModeShared);
+
+    MTL::Buffer* pCustKeyBuffer = pDevice->newBuffer(c_custkey.data(), customer_size * sizeof(int), MTL::ResourceStorageModeShared);
+    const uint inter_hist_size = num_threadgroups * 32;
+    MTL::Buffer* pInterHistBuffer = pDevice->newBuffer(inter_hist_size * sizeof(Q13_CustDist_CPU), MTL::ResourceStorageModeShared);
+
+    // 4. Dispatch the first 3 stages of the pipeline
+    MTL::CommandBuffer* pCommandBuffer = pCommandQueue->commandBuffer();
+    
+    MTL::ComputeCommandEncoder* pEnc1 = pCommandBuffer->computeCommandEncoder();
+    pEnc1->setComputePipelineState(pLocalCountPipe);
+    pEnc1->setBuffer(pOrdCustKeyBuffer, 0, 0); pEnc1->setBuffer(pOrdCommentBuffer, 0, 1);
+    pEnc1->setBuffer(pInterCountsBuffer, 0, 2); pEnc1->setBytes(&orders_size, sizeof(orders_size), 3);
+    pEnc1->dispatchThreadgroups(MTL::Size(num_threadgroups, 1, 1), MTL::Size(1024, 1, 1));
+    pEnc1->endEncoding();
+    
+    MTL::ComputeCommandEncoder* pEnc2 = pCommandBuffer->computeCommandEncoder();
+    pEnc2->setComputePipelineState(pMergeCountPipe);
+    pEnc2->setBuffer(pInterCountsBuffer, 0, 0); pEnc2->setBuffer(pFinalCountsHTBuffer, 0, 1);
+    pEnc2->setBytes(&inter_count_size, sizeof(inter_count_size), 2);
+    pEnc2->setBytes(&final_count_ht_size, sizeof(final_count_ht_size), 3);
+    pEnc2->dispatchThreads(MTL::Size(inter_count_size, 1, 1), MTL::Size(1024, 1, 1));
+    pEnc2->endEncoding();
+
+    MTL::ComputeCommandEncoder* pEnc3 = pCommandBuffer->computeCommandEncoder();
+    pEnc3->setComputePipelineState(pLocalHistPipe);
+    pEnc3->setBuffer(pCustKeyBuffer, 0, 0); pEnc3->setBuffer(pFinalCountsHTBuffer, 0, 1);
+    pEnc3->setBuffer(pInterHistBuffer, 0, 2); pEnc3->setBytes(&customer_size, sizeof(customer_size), 3);
+    pEnc3->setBytes(&final_count_ht_size, sizeof(final_count_ht_size), 4);
+    pEnc3->dispatchThreadgroups(MTL::Size(num_threadgroups, 1, 1), MTL::Size(1024, 1, 1));
+    pEnc3->endEncoding();
+    
+    // NOTE: Stage 4 (final merge) is removed from the GPU pipeline
+
+    // 5. Execute GPU work
+    pCommandBuffer->commit();
+    pCommandBuffer->waitUntilCompleted();
+    double gpuExecutionTime = pCommandBuffer->GPUEndTime() - pCommandBuffer->GPUStartTime();
+
+    // 6. Perform final merge on CPU (The new, optimized Stage 4)
+    Q13_CustDist_CPU* inter_results = (Q13_CustDist_CPU*)pInterHistBuffer->contents();
+    std::map<uint, uint> final_histogram;
+    for (uint i = 0; i < inter_hist_size; ++i) {
+        if (inter_results[i].custdist > 0) {
+            final_histogram[inter_results[i].c_count] += inter_results[i].custdist;
+        }
+    }
+    
+    // Add customers with 0 orders to correctly handle the LEFT JOIN
+    uint total_customers_in_histogram = 0;
+    for(auto const& [key, val] : final_histogram) {
+        total_customers_in_histogram += val;
+    }
+    final_histogram[0] += (customer_size - total_customers_in_histogram);
+
+    // 7. Process and print results
+    std::vector<Q13Result> final_results;
+    for(auto const& [key, val] : final_histogram) {
+        final_results.push_back({key, val});
+    }
+
+    std::sort(final_results.begin(), final_results.end(), [](const Q13Result& a, const Q13Result& b) {
+        if (a.custdist != b.custdist) return a.custdist > b.custdist;
+        return a.c_count > b.c_count;
+    });
+
+    printf("\nTPC-H Query 13 Results:\n");
+    printf("+---------+----------+\n");
+    printf("| c_count | custdist |\n");
+    printf("+---------+----------+\n");
+    for(const auto& res : final_results) {
+        printf("| %7u | %8u |\n", res.c_count, res.custdist);
+    }
+    printf("+---------+----------+\n");
+    printf("Total TPC-H Q13 GPU time: %f ms\n", gpuExecutionTime * 1000.0);
+
+    // Release objects...
+    pLocalCountFn->release(); pLocalCountPipe->release();
+    pMergeCountFn->release(); pMergeCountPipe->release();
+    pLocalHistFn->release(); pLocalHistPipe->release();
+    pOrdCustKeyBuffer->release(); pOrdCommentBuffer->release();
+    pInterCountsBuffer->release(); pFinalCountsHTBuffer->release();
+    pCustKeyBuffer->release(); pInterHistBuffer->release();
+}
+
+
 // --- Main Entry Point ---
 int main(int argc, const char * argv[]) {
     NS::AutoreleasePool* pAutoreleasePool = NS::AutoreleasePool::alloc()->init();
@@ -1142,7 +1282,8 @@ int main(int argc, const char * argv[]) {
     // runQ1Benchmark(device, commandQueue, library);
     // runQ3Benchmark(device, commandQueue, library);
     // runQ6Benchmark(device, commandQueue, library);
-    runQ9Benchmark(device, commandQueue, library);
+    //runQ9Benchmark(device, commandQueue, library);
+    runQ13Benchmark(device, commandQueue, library);
     
     // Cleanup
     library->release();
