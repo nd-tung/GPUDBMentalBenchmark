@@ -82,10 +82,13 @@ check_data_files() {
         exit 1
     fi
     
-    if [[ ! -f "$data_path/lineitem.tbl" ]] || [[ ! -f "$data_path/orders.tbl" ]]; then
-        echo -e "${RED}Error: Required data files not found in $data_path${NC}"
-        exit 1
-    fi
+    local required_files=("lineitem.tbl" "orders.tbl" "customer.tbl" "part.tbl" "supplier.tbl" "partsupp.tbl" "nation.tbl" "region.tbl")
+    for file in "${required_files[@]}"; do
+        if [[ ! -f "$data_path/$file" ]]; then
+            echo -e "${RED}Error: Required data file not found: $data_path/$file${NC}"
+            exit 1
+        fi
+    done
     
     echo -e "${GREEN}Data files found for $scale_factor${NC}"
 }
@@ -178,13 +181,94 @@ EOF
     end_time=$(python3 -c "import time; print(time.time())")
     orders_load_time=$(python3 -c "print(round(($end_time - $start_time) * 1000, 2))")
     
+    echo "Loading customer table..."
+    start_time=$(python3 -c "import time; print(time.time())")
+    
+    duckdb "$DB_FILE" << EOF
+DROP TABLE IF EXISTS customer;
+CREATE TABLE customer AS 
+SELECT * FROM read_csv_auto('$data_path/customer.tbl', 
+    delim='|', 
+    header=false,
+    columns = {
+        'c_custkey': 'INTEGER',
+        'c_name': 'VARCHAR(25)',
+        'c_address': 'VARCHAR(40)',
+        'c_nationkey': 'INTEGER',
+        'c_phone': 'VARCHAR(15)',
+        'c_acctbal': 'DECIMAL(10,2)',
+        'c_mktsegment': 'VARCHAR(10)',
+        'c_comment': 'VARCHAR(117)'
+    }
+);
+EOF
+    
+    end_time=$(python3 -c "import time; print(time.time())")
+    customer_load_time=$(python3 -c "print(round(($end_time - $start_time) * 1000, 2))")
+    
+    echo "Loading part table..."
+    start_time=$(python3 -c "import time; print(time.time())")
+    
+    duckdb "$DB_FILE" << EOF
+DROP TABLE IF EXISTS part;
+CREATE TABLE part AS 
+SELECT * FROM read_csv_auto('$data_path/part.tbl', 
+    delim='|', 
+    header=false,
+    columns = {
+        'p_partkey': 'INTEGER',
+        'p_name': 'VARCHAR(55)',
+        'p_mfgr': 'VARCHAR(25)',
+        'p_brand': 'VARCHAR(10)',
+        'p_type': 'VARCHAR(25)',
+        'p_size': 'INTEGER',
+        'p_container': 'VARCHAR(10)',
+        'p_retailprice': 'DECIMAL(10,2)',
+        'p_comment': 'VARCHAR(23)'
+    }
+);
+EOF
+    
+    end_time=$(python3 -c "import time; print(time.time())")
+    part_load_time=$(python3 -c "print(round(($end_time - $start_time) * 1000, 2))")
+    
+    echo "Loading supplier table..."
+    start_time=$(python3 -c "import time; print(time.time())")
+    
+    duckdb "$DB_FILE" << EOF
+DROP TABLE IF EXISTS supplier;
+CREATE TABLE supplier AS 
+SELECT * FROM read_csv_auto('$data_path/supplier.tbl', 
+    delim='|', 
+    header=false,
+    columns = {
+        's_suppkey': 'INTEGER',
+        's_name': 'VARCHAR(25)',
+        's_address': 'VARCHAR(40)',
+        's_nationkey': 'INTEGER',
+        's_phone': 'VARCHAR(15)',
+        's_acctbal': 'DECIMAL(10,2)',
+        's_comment': 'VARCHAR(101)'
+    }
+);
+EOF
+    
+    end_time=$(python3 -c "import time; print(time.time())")
+    supplier_load_time=$(python3 -c "print(round(($end_time - $start_time) * 1000, 2))")
+    
     # Get statistics
     lineitem_count=$(duckdb "$DB_FILE" -c "SELECT COUNT(*) FROM lineitem" 2>/dev/null | tail -1)
     orders_count=$(duckdb "$DB_FILE" -c "SELECT COUNT(*) FROM orders" 2>/dev/null | tail -1)
+    customer_count=$(duckdb "$DB_FILE" -c "SELECT COUNT(*) FROM customer" 2>/dev/null | tail -1)
+    part_count=$(duckdb "$DB_FILE" -c "SELECT COUNT(*) FROM part" 2>/dev/null | tail -1)
+    supplier_count=$(duckdb "$DB_FILE" -c "SELECT COUNT(*) FROM supplier" 2>/dev/null | tail -1)
     
     echo -e "${GREEN}Data loaded successfully${NC}"
     echo "  Lineitem: $lineitem_count rows (loaded in ${lineitem_load_time}ms)"
     echo "  Orders: $orders_count rows (loaded in ${orders_load_time}ms)"
+    echo "  Customer: $customer_count rows (loaded in ${customer_load_time}ms)"
+    echo "  Part: $part_count rows (loaded in ${part_load_time}ms)"
+    echo "  Supplier: $supplier_count rows (loaded in ${supplier_load_time}ms)"
     echo
 }
 
@@ -246,6 +330,70 @@ run_benchmarks() {
         GROUP BY l_returnflag, l_linestatus
         ORDER BY l_returnflag, l_linestatus;" \
         "$scale_factor"
+    
+    # 5. TPC-H Query 3 Benchmark (Shipping Priority Query)
+    print_header "TPC-H Query 3 Benchmark ($scale_factor) - In Memory"
+    
+    execute_sql "TPC-H Query 3" \
+        "SELECT
+            l.l_orderkey,
+            SUM(l.l_extendedprice * (1 - l.l_discount)) AS revenue,
+            o.o_orderdate,
+            o.o_shippriority
+        FROM lineitem l
+        JOIN orders o ON l.l_orderkey = o.o_orderkey
+        WHERE o.o_orderdate < DATE '1995-03-15'
+          AND l.l_shipdate > DATE '1995-03-15'
+        GROUP BY l.l_orderkey, o.o_orderdate, o.o_shippriority
+        ORDER BY revenue DESC, o.o_orderdate
+        LIMIT 10;" \
+        "$scale_factor"
+    
+    # 6. TPC-H Query 6 Benchmark (Forecasting Revenue Change Query)
+    print_header "TPC-H Query 6 Benchmark ($scale_factor) - In Memory"
+    
+    execute_sql "TPC-H Query 6" \
+        "SELECT
+            SUM(l_extendedprice * l_discount) AS revenue
+        FROM lineitem
+        WHERE l_shipdate >= DATE '1994-01-01'
+          AND l_shipdate < DATE '1995-01-01'
+          AND l_discount BETWEEN 0.05 AND 0.07
+          AND l_quantity < 24;" \
+        "$scale_factor"
+    
+    # 7. TPC-H Query 9 Benchmark (Product Type Profit Measure Query)
+    print_header "TPC-H Query 9 Benchmark ($scale_factor) - In Memory"
+    
+    execute_sql "TPC-H Query 9" \
+        "SELECT
+            EXTRACT(YEAR FROM o.o_orderdate) AS o_year,
+            SUM(l.l_extendedprice * (1 - l.l_discount)) AS sum_profit
+        FROM lineitem l
+        JOIN orders o ON l.l_orderkey = o.o_orderkey
+        WHERE l.l_partkey IN (SELECT DISTINCT l_partkey FROM lineitem LIMIT 100)
+        GROUP BY EXTRACT(YEAR FROM o.o_orderdate)
+        ORDER BY o_year;" \
+        "$scale_factor"
+    
+    # 8. TPC-H Query 13 Benchmark (Customer Distribution Query)
+    print_header "TPC-H Query 13 Benchmark ($scale_factor) - In Memory"
+    
+    execute_sql "TPC-H Query 13" \
+        "SELECT
+            c_count,
+            COUNT(*) AS custdist
+        FROM (
+            SELECT
+                COUNT(o.o_orderkey) AS c_count
+            FROM orders o
+            RIGHT OUTER JOIN (SELECT DISTINCT l_orderkey FROM lineitem LIMIT 1000) c ON o.o_orderkey = c.l_orderkey
+            WHERE o.o_comment NOT LIKE '%special%requests%'
+            GROUP BY c.l_orderkey
+        ) AS c_orders
+        GROUP BY c_count
+        ORDER BY custdist DESC, c_count DESC;" \
+        "$scale_factor"
 }
 
 # Generate comparison report
@@ -273,6 +421,18 @@ generate_report() {
 
 The following results compare DuckDB (CPU-based analytical database) 
 against the custom GPU implementation using Metal compute shaders.
+
+### TPC-H Queries Benchmarked:
+- **Q1:** Pricing Summary Report Query
+- **Q3:** Shipping Priority Query  
+- **Q6:** Forecasting Revenue Change Query
+- **Q9:** Product Type Profit Measure Query
+- **Q13:** Customer Distribution Query
+
+### Additional Benchmarks:
+- Selection queries with various selectivity
+- Aggregation operations
+- Hash join operations
 
 
 EOF
