@@ -14,6 +14,9 @@
 #include <iomanip>
 #include <cmath>
 
+// Global dataset configuration
+std::string g_dataset_path = "Data/SF-10/"; // Default to SF-10
+
 // --- Helper to Load Integer Column ---
 std::vector<int> loadIntColumn(const std::string& filePath, int columnIndex) {
     std::vector<int> data;
@@ -129,7 +132,7 @@ void runSelectionBenchmark(MTL::Device* device, MTL::CommandQueue* commandQueue,
     std::cout << "--- Running Selection Benchmark ---" << std::endl;
 
     //Select tpch data file
-    std::vector<int> cpuData = loadIntColumn("Data/SF-10/lineitem.tbl", 1);
+    std::vector<int> cpuData = loadIntColumn(g_dataset_path + "lineitem.tbl", 1);
     if (cpuData.empty()) { return; }
     std::cout << "Loaded " << cpuData.size() << " rows for selection." << std::endl;
 
@@ -167,7 +170,7 @@ void runAggregationBenchmark(MTL::Device* device, MTL::CommandQueue* commandQueu
     std::cout << "--- Running Aggregation Benchmark ---" << std::endl;
 
     //Select tpch data file
-    std::vector<float> cpuData = loadFloatColumn("Data/SF-10/lineitem.tbl", 4);
+    std::vector<float> cpuData = loadFloatColumn(g_dataset_path + "lineitem.tbl", 4);
     if (cpuData.empty()) return;
     std::cout << "Loaded " << cpuData.size() << " rows for aggregation." << std::endl;
     const unsigned long dataSizeBytes = cpuData.size() * sizeof(float);
@@ -256,9 +259,9 @@ void runJoinBenchmark(MTL::Device* device, MTL::CommandQueue* commandQueue, MTL:
     // =================================================================
     
     // 1. Load Data for the build side (orders table)
-    std::vector<int> buildKeys = loadIntColumn("Data/SF-10/orders.tbl", 0);
+    std::vector<int> buildKeys = loadIntColumn(g_dataset_path + "orders.tbl", 0);
     if (buildKeys.empty()) {
-        std::cerr << "Error: Could not open 'orders.tbl'. Make sure it's in your Data/SF-1 folder." << std::endl;
+        std::cerr << "Error: Could not open 'orders.tbl'. Make sure it's in your " << g_dataset_path << " folder." << std::endl;
         return;
     }
     const uint buildDataSize = (uint)buildKeys.size();
@@ -315,7 +318,7 @@ void runJoinBenchmark(MTL::Device* device, MTL::CommandQueue* commandQueue, MTL:
     
     // 7. Load Data for the probe side (lineitem table)
     // l_orderkey is the 1st column (index 0)
-    std::vector<int> probeKeys = loadIntColumn("Data/SF-10/lineitem.tbl", 0);
+    std::vector<int> probeKeys = loadIntColumn(g_dataset_path + "lineitem.tbl", 0);
     if (probeKeys.empty()) {
         std::cerr << "Error: Could not open 'lineitem.tbl' for probe phase." << std::endl;
         return;
@@ -410,7 +413,7 @@ struct Q1Aggregates_CPU {
 void runQ1Benchmark(MTL::Device* device, MTL::CommandQueue* commandQueue, MTL::Library* library) {
     std::cout << "--- Running TPC-H Query 1 Benchmark ---" << std::endl;
 
-    const std::string filepath = "Data/SF-10/lineitem.tbl";
+    const std::string filepath = g_dataset_path + "lineitem.tbl";
     auto l_returnflag = loadCharColumn(filepath, 8), l_linestatus = loadCharColumn(filepath, 9);
     auto l_quantity = loadFloatColumn(filepath, 4), l_extendedprice = loadFloatColumn(filepath, 5);
     auto l_discount = loadFloatColumn(filepath, 6), l_tax = loadFloatColumn(filepath, 7);
@@ -514,7 +517,7 @@ void runQ1Benchmark(MTL::Device* device, MTL::CommandQueue* commandQueue, MTL::L
                val.avg_qty, val.avg_price, val.avg_disc, val.count);
     }
     printf("+----------+----------+------------+----------------+----------------+----------------+------------+------------+------------+----------+\n");
-    std::cout << "Total TPC-H Q1 GPU time (High-Performance): " << gpuExecutionTime * 1000.0 << " ms" << std::endl;
+    std::cout << "Total TPC-H Q1 GPU time: " << gpuExecutionTime * 1000.0 << " ms" << std::endl;
     
     // Cleanup
     selectionFunction->release();
@@ -561,7 +564,7 @@ void runQ3Benchmark(MTL::Device* pDevice, MTL::CommandQueue* pCommandQueue, MTL:
     std::cout << "\n--- Running TPC-H Query 3 Benchmark ---" << std::endl;
 
     // 1. Load data for all three tables
-    const std::string sf_path = "Data/SF-1/";
+    const std::string sf_path = g_dataset_path;
     auto c_custkey = loadIntColumn(sf_path + "customer.tbl", 0);
     auto c_mktsegment = loadCharColumn(sf_path + "customer.tbl", 6);
 
@@ -738,10 +741,10 @@ void runQ6Benchmark(MTL::Device* device, MTL::CommandQueue* commandQueue, MTL::L
     std::cout << "--- Running TPC-H Query 6 Benchmark ---" << std::endl;
     
     // Load required columns from lineitem table
-    std::vector<int> l_shipdate = loadDateColumn("Data/SF-10/lineitem.tbl", 10);    // Column 10: l_shipdate
-    std::vector<float> l_discount = loadFloatColumn("Data/SF-10/lineitem.tbl", 6);  // Column 6: l_discount
-    std::vector<float> l_quantity = loadFloatColumn("Data/SF-10/lineitem.tbl", 4);  // Column 4: l_quantity
-    std::vector<float> l_extendedprice = loadFloatColumn("Data/SF-10/lineitem.tbl", 5); // Column 5: l_extendedprice
+    std::vector<int> l_shipdate = loadDateColumn(g_dataset_path + "lineitem.tbl", 10);    // Column 10: l_shipdate
+    std::vector<float> l_discount = loadFloatColumn(g_dataset_path + "lineitem.tbl", 6);  // Column 6: l_discount
+    std::vector<float> l_quantity = loadFloatColumn(g_dataset_path + "lineitem.tbl", 4);  // Column 4: l_quantity
+    std::vector<float> l_extendedprice = loadFloatColumn(g_dataset_path + "lineitem.tbl", 5); // Column 5: l_extendedprice
 
     if (l_shipdate.empty() || l_discount.empty() || l_quantity.empty() || l_extendedprice.empty()) {
         std::cerr << "Error: Could not load required columns for Q6 benchmark" << std::endl;
@@ -890,7 +893,7 @@ struct Q9Aggregates_CPU {
 void runQ9Benchmark(MTL::Device* pDevice, MTL::CommandQueue* pCommandQueue, MTL::Library* pLibrary) {
     std::cout << "\n--- Running TPC-H Query 9 Benchmark ---" << std::endl;
 
-    const std::string sf_path = "Data/SF-1/";
+    const std::string sf_path = g_dataset_path;
     
     // 1. Load data for all SIX tables
     auto p_partkey = loadIntColumn(sf_path + "part.tbl", 0);
@@ -1124,7 +1127,7 @@ struct Q13Result {
 void runQ13Benchmark(MTL::Device* pDevice, MTL::CommandQueue* pCommandQueue, MTL::Library* pLibrary) {
     std::cout << "\n--- Running TPC-H Query 13 Benchmark ---" << std::endl;
 
-    const std::string sf_path = "Data/SF-1/";
+    const std::string sf_path = g_dataset_path;
     
     // 1. Load data
     auto o_custkey = loadIntColumn(sf_path + "orders.tbl", 1);
@@ -1273,6 +1276,14 @@ int main(int argc, const char * argv[]) {
         if (query == "help" || query == "--help" || query == "-h") {
             showHelp();
             return 0;
+        }
+        // Set dataset path based on argument
+        if (query == "sf1") {
+            g_dataset_path = "Data/SF-1/";
+            query = "all"; // Run all benchmarks with SF-1
+        } else if (query == "sf10") {
+            g_dataset_path = "Data/SF-10/";
+            query = "all"; // Run all benchmarks with SF-10
         }
     }
 
