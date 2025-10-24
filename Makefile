@@ -72,7 +72,7 @@ uninstall:
 	@rm -f /usr/local/bin/$(PROJECT_NAME)
 	@echo "Uninstall complete"
 
-# Run the program
+# Run the program (default: all queries with SF-10)
 .PHONY: run
 run: $(TARGET)
 	@echo "Running $(PROJECT_NAME)..."
@@ -82,12 +82,12 @@ run: $(TARGET)
 .PHONY: run-sf1
 run-sf1: $(TARGET)
 	@echo "Running $(PROJECT_NAME) with SF-1 dataset..."
-	@sed 's/SF-10/SF-1/g' $(SOURCE_DIR)/main.cpp > /tmp/main_sf1.cpp && \
-	$(CXX) $(CXXFLAGS) $(INCLUDES) /tmp/main_sf1.cpp $(FRAMEWORKS) -o $(BIN_DIR)/$(PROJECT_NAME)_sf1 && \
-	cd GPUDBMentalBenchmark && ../$(BIN_DIR)/$(PROJECT_NAME)_sf1
+	@cd GPUDBMentalBenchmark && ../$(TARGET) sf1
 
 .PHONY: run-sf10
-run-sf10: run
+run-sf10: $(TARGET)
+	@echo "Running $(PROJECT_NAME) with SF-10 dataset..."
+	@cd GPUDBMentalBenchmark && ../$(TARGET) sf10
 
 # Run TPC-H Query benchmarks individually
 .PHONY: run-q1

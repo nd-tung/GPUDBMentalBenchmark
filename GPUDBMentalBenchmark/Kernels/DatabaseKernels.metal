@@ -696,23 +696,17 @@ kernel void q3_probe_and_local_agg_kernel(
     const device int* o_custkey,
     const device int* o_orderdate,
     const device int* o_shippriority,
-    device Q3Aggregates_Local* intermediate_results,
+    device Q3Aggregates_Local* out_results,
+    device atomic_uint* out_count,
     constant uint& lineitem_size,
     constant uint& customer_ht_size,
     constant uint& orders_ht_size,
     constant int& cutoff_date,
+    constant uint& out_capacity,
     uint group_id [[threadgroup_position_in_grid]],
     uint thread_id_in_group [[thread_index_in_threadgroup]],
     uint threads_per_group [[threads_per_threadgroup]])
 {
-    const int local_ht_size = 64;
-    thread Q3Aggregates_Local local_ht[local_ht_size];
-    for (int i = thread_id_in_group; i < local_ht_size; i += threads_per_group) {
-        local_ht[i].key = -1;
-        local_ht[i].revenue = 0.0f;
-    }
-    threadgroup_barrier(mem_flags::mem_threadgroup);
-
     uint grid_size = threads_per_group * 2048;
     for (uint i = (group_id * threads_per_group) + thread_id_in_group; i < lineitem_size; i += grid_size) {
         
@@ -751,32 +745,22 @@ kernel void q3_probe_and_local_agg_kernel(
         if (!customer_match) continue;
         
         float revenue = l_extendedprice[i] * (1.0f - l_discount[i]);
-        uint agg_hash = (uint)orderkey % local_ht_size;
-
-        for(int k = 0; k < local_ht_size; ++k) {
-            uint probe_idx = (agg_hash + k) % local_ht_size;
-            if(local_ht[probe_idx].key == -1 || local_ht[probe_idx].key == orderkey) {
-                local_ht[probe_idx].key = orderkey;
-                local_ht[probe_idx].revenue += revenue;
-                // CORRECTLY look up the date and priority from the original arrays
-                local_ht[probe_idx].orderdate = (uint)o_orderdate[orders_idx];
-                local_ht[probe_idx].shippriority = (uint)o_shippriority[orders_idx];
-                break;
-            }
+        // Append one record per matching lineitem
+        uint idx = atomic_fetch_add_explicit(out_count, 1u, memory_order_relaxed);
+        if (idx < out_capacity) {
+            Q3Aggregates_Local r;
+            r.key = orderkey;
+            r.revenue = revenue;
+            r.orderdate = (uint)o_orderdate[orders_idx];
+            r.shippriority = (uint)o_shippriority[orders_idx];
+            out_results[idx] = r;
         }
     }
-    threadgroup_barrier(mem_flags::mem_threadgroup);
-
-    // Write local results to global memory
-    for (int i = thread_id_in_group; i < local_ht_size; i += threads_per_group) {
-        if (local_ht[i].key != -1) {
-            intermediate_results[group_id * local_ht_size + i] = local_ht[i];
-        }
-    }
+    // No threadgroup reduction; results are appended globally
 }
 
 
-// KERNEL 4: The final merge kernel (No changes needed)
+// KERNEL 4: The final merge kernel - Fixed to handle multiple contributors
 kernel void q3_merge_results_kernel(
     const device Q3Aggregates_Local* intermediate_results,
     device Q3Aggregates* final_hashtable,
@@ -796,15 +780,21 @@ kernel void q3_merge_results_kernel(
         
         int expected = -1;
         if (atomic_compare_exchange_weak_explicit(&final_hashtable[probe_index].key, &expected, local_result.key, memory_order_relaxed, memory_order_relaxed)) {
-            atomic_store_explicit(&final_hashtable[probe_index].revenue, 0.0f, memory_order_relaxed);
+            // Successfully claimed this slot - initialize with our values
+            atomic_store_explicit(&final_hashtable[probe_index].revenue, local_result.revenue, memory_order_relaxed);
             atomic_store_explicit(&final_hashtable[probe_index].orderdate, local_result.orderdate, memory_order_relaxed);
             atomic_store_explicit(&final_hashtable[probe_index].shippriority, local_result.shippriority, memory_order_relaxed);
+            return;
         }
         
-        if (atomic_load_explicit(&final_hashtable[probe_index].key, memory_order_relaxed) == local_result.key) {
+        // Slot is occupied - check if it's our key
+        int current_key = atomic_load_explicit(&final_hashtable[probe_index].key, memory_order_relaxed);
+        if (current_key == local_result.key) {
+            // Found our key - add our revenue to it
             atomic_fetch_add_explicit(&final_hashtable[probe_index].revenue, local_result.revenue, memory_order_relaxed);
             return;
         }
+        // else: collision with different key, continue probing
     }
 }
 

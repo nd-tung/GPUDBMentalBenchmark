@@ -15,7 +15,7 @@
 #include <cmath>
 
 // Global dataset configuration
-std::string g_dataset_path = "Data/SF-10/"; // Default to SF-10
+std::string g_dataset_path = "Data/SF-1/"; // Default to SF-10
 
 // --- Helper to Load Integer Column ---
 std::vector<int> loadIntColumn(const std::string& filePath, int columnIndex) {
@@ -618,9 +618,12 @@ void runQ3Benchmark(MTL::Device* pDevice, MTL::CommandQueue* pCommandQueue, MTL:
     MTL::Buffer* pLineDiscBuffer = pDevice->newBuffer(l_discount.data(), lineitem_size * sizeof(float), MTL::ResourceStorageModeShared);
     
     const uint num_threadgroups = 2048;
-    const uint local_ht_size = 64;
-    const uint intermediate_size = num_threadgroups * local_ht_size;
-    MTL::Buffer* pIntermediateBuffer = pDevice->newBuffer(intermediate_size * sizeof(Q3Aggregates_CPU), MTL::ResourceStorageModeShared);
+    // Allocate intermediate as an append-only buffer up to lineitem_size
+    const uint intermediate_capacity = lineitem_size;
+    MTL::Buffer* pIntermediateBuffer = pDevice->newBuffer(intermediate_capacity * sizeof(Q3Aggregates_CPU), MTL::ResourceStorageModeShared);
+    MTL::Buffer* pOutCountBuffer = pDevice->newBuffer(sizeof(uint), MTL::ResourceStorageModeShared);
+    // Initialize out counter to 0
+    memset(pOutCountBuffer->contents(), 0, sizeof(uint));
 
     const uint final_ht_size = orders_size;
     std::vector<int> cpu_final_ht(final_ht_size * (sizeof(Q3Aggregates_CPU)/sizeof(int)), -1);
@@ -663,39 +666,73 @@ void runQ3Benchmark(MTL::Device* pDevice, MTL::CommandQueue* pCommandQueue, MTL:
     pProbeAggEncoder->setBuffer(pOrdDateBuffer, 0, 7);
     pProbeAggEncoder->setBuffer(pOrdPrioBuffer, 0, 8);
     pProbeAggEncoder->setBuffer(pIntermediateBuffer, 0, 9);
-    pProbeAggEncoder->setBytes(&lineitem_size, sizeof(lineitem_size), 10);
-    pProbeAggEncoder->setBytes(&customer_ht_size, sizeof(customer_ht_size), 11);
-    pProbeAggEncoder->setBytes(&orders_ht_size, sizeof(orders_ht_size), 12);
-    pProbeAggEncoder->setBytes(&cutoff_date, sizeof(cutoff_date), 13);
+    pProbeAggEncoder->setBuffer(pOutCountBuffer, 0, 10);
+    pProbeAggEncoder->setBytes(&lineitem_size, sizeof(lineitem_size), 11);
+    pProbeAggEncoder->setBytes(&customer_ht_size, sizeof(customer_ht_size), 12);
+    pProbeAggEncoder->setBytes(&orders_ht_size, sizeof(orders_ht_size), 13);
+    pProbeAggEncoder->setBytes(&cutoff_date, sizeof(cutoff_date), 14);
+    pProbeAggEncoder->setBytes(&intermediate_capacity, sizeof(intermediate_capacity), 15);
     pProbeAggEncoder->dispatchThreadgroups(MTL::Size(num_threadgroups, 1, 1), MTL::Size(1024, 1, 1));
     pProbeAggEncoder->endEncoding();
     
-    MTL::ComputeCommandEncoder* pMergeEncoder = pCommandBuffer->computeCommandEncoder();
-    pMergeEncoder->setComputePipelineState(pMergePipe);
-    pMergeEncoder->setBuffer(pIntermediateBuffer, 0, 0);
-    pMergeEncoder->setBuffer(pFinalHTBuffer, 0, 1);
-    pMergeEncoder->setBytes(&intermediate_size, sizeof(intermediate_size), 2);
-    pMergeEncoder->setBytes(&final_ht_size, sizeof(final_ht_size), 3);
-    pMergeEncoder->dispatchThreads(MTL::Size(intermediate_size, 1, 1), MTL::Size(1024, 1, 1));
-    pMergeEncoder->endEncoding();
+    // Ensure final hash table is initialized to empty (-1 keys) on CPU (shared memory)
+    {   
+        void* final_ptr = pFinalHTBuffer->contents();
+        memset(final_ptr, 0xFF, final_ht_size * sizeof(Q3Aggregates_CPU));
+    }
 
-    // 5. Execute and time
+    // NOTE: Skip GPU merge stage for Q3 due to non-determinism; perform final merge on CPU for correctness
+
+    // 5. Execute and time (GPU portion up to local agg)
     pCommandBuffer->commit();
     pCommandBuffer->waitUntilCompleted();
     double gpuExecutionTime = pCommandBuffer->GPUEndTime() - pCommandBuffer->GPUStartTime();
 
-    // 6. Process and print final results
-    Q3Aggregates_CPU* results = (Q3Aggregates_CPU*)pFinalHTBuffer->contents();
-    std::vector<Q3Result> final_results;
-    for (uint i = 0; i < final_ht_size; ++i) {
-        if (results[i].key != -1) {
-            final_results.push_back({results[i].key, results[i].revenue, (int)results[i].orderdate, (int)results[i].shippriority});
+    // Debug: count non-empty intermediate results
+    {
+        uint out_count = *(uint*)pOutCountBuffer->contents();
+        Q3Aggregates_CPU* inter_dbg = (Q3Aggregates_CPU*)pIntermediateBuffer->contents();
+        size_t non_empty = 0;
+        int printed = 0;
+        for (uint i = 0; i < out_count && i < 100000; ++i) { // cap scan for speed
+            if (inter_dbg[i].key > 0) {
+                non_empty++;
+                if (printed < 5) {
+                    std::cout << "[DEBUG] inter[" << i << "]: key=" << inter_dbg[i].key
+                              << ", revenue=" << inter_dbg[i].revenue
+                              << ", orderdate=" << inter_dbg[i].orderdate
+                              << ", shippriority=" << inter_dbg[i].shippriority << std::endl;
+                    printed++;
+                }
+            }
+        }
+        std::cout << "[DEBUG] Intermediate non-empty entries: " << non_empty << "/" << out_count << std::endl;
+    }
+
+    // 6. CPU merge for determinism and correctness
+    auto cpuMergeStart = std::chrono::high_resolution_clock::now();
+    std::unordered_map<int, Q3Result> acc;
+    uint out_count = *(uint*)pOutCountBuffer->contents();
+    Q3Aggregates_CPU* inter = (Q3Aggregates_CPU*)pIntermediateBuffer->contents();
+    for (uint i = 0; i < out_count; ++i) {
+        if (inter[i].key > 0) {
+            auto it = acc.find(inter[i].key);
+            if (it == acc.end()) {
+                acc.emplace(inter[i].key, Q3Result{inter[i].key, inter[i].revenue, (int)inter[i].orderdate, (int)inter[i].shippriority});
+            } else {
+                it->second.revenue += inter[i].revenue;
+            }
         }
     }
-    
+    std::vector<Q3Result> final_results;
+    final_results.reserve(acc.size());
+    for (auto &kv : acc) final_results.push_back(kv.second);
     std::sort(final_results.begin(), final_results.end(), [](const Q3Result& a, const Q3Result& b) {
-        return a.revenue > b.revenue;
+        if (a.revenue != b.revenue) return a.revenue > b.revenue;
+        return a.orderdate < b.orderdate;
     });
+    auto cpuMergeEnd = std::chrono::high_resolution_clock::now();
+    double cpuMergeMs = std::chrono::duration<double, std::milli>(cpuMergeEnd - cpuMergeStart).count();
 
     printf("\nTPC-H Query 3 Results (Top 10):\n");
     printf("+----------+------------+------------+--------------+\n");
@@ -707,7 +744,10 @@ void runQ3Benchmark(MTL::Device* pDevice, MTL::CommandQueue* pCommandQueue, MTL:
     }
     printf("+----------+------------+------------+--------------+\n");
     printf("Total results found: %lu\n", final_results.size());
-    printf("Total TPC-H Q3 GPU time: %f ms\n", gpuExecutionTime * 1000.0);
+    printf("Q3 Mode: Hybrid (GPU probe + CPU merge)\n");
+    printf("  GPU time (build+probe): %0.3f ms\n", gpuExecutionTime * 1000.0);
+    printf("  CPU merge time: %0.3f ms\n", cpuMergeMs);
+    printf("  Total hybrid time: %0.3f ms\n", gpuExecutionTime * 1000.0 + cpuMergeMs);
     
     //Cleanup
     pCustBuildFn->release();
@@ -732,6 +772,7 @@ void runQ3Benchmark(MTL::Device* pDevice, MTL::CommandQueue* pCommandQueue, MTL:
     pLinePriceBuffer->release();
     pLineDiscBuffer->release();
     pIntermediateBuffer->release();
+    pOutCountBuffer->release();
     pFinalHTBuffer->release();
 }
 
