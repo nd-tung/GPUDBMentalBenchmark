@@ -1153,30 +1153,16 @@ void runQ9Benchmark(MTL::Device* pDevice, MTL::CommandQueue* pCommandQueue, MTL:
         return a.year > b.year;
     });
 
-    // Print all results for verification
-    printf("\nTPC-H Query 9 Results (All):\n");
+    printf("\nTPC-H Query 9 Results (Top 15):\n");
     printf("+------------+------+---------------+\n");
     printf("| Nation     | Year |        Profit |\n");
     printf("+------------+------+---------------+\n");
-    for (size_t i = 0; i < final_results.size(); ++i) {
+    for (int i = 0; i < 15 && i < final_results.size(); ++i) {
         printf("| %-10s | %4d | $%13.2f |\n",
                nation_names[final_results[i].nationkey].c_str(), final_results[i].year, final_results[i].profit);
     }
     printf("+------------+------+---------------+\n");
     printf("Total results found: %lu\n", final_results.size());
-    
-    // Also write results to CSV for automated comparison
-    {
-        std::ofstream q9csv("../benchmark_results/q9_gpu_sf1.csv", std::ios::trunc);
-        if (q9csv.is_open()) {
-            q9csv << "nation,o_year,sum_profit\n";
-            for (const auto& r : final_results) {
-                q9csv << nation_names[r.nationkey] << "," << r.year << "," << std::fixed << std::setprecision(2) << r.profit << "\n";
-            }
-            q9csv.close();
-        }
-    }
-    
     printf("Q9 probe+merge wall-clock: %0.2f ms\n", probeMergeTime * 1000.0);
     printf("Total TPC-H Q9 GPU time: %0.2f ms\n", q9_e2e_time * 1000.0);
     
@@ -1266,7 +1252,7 @@ void runQ13Benchmark(MTL::Device* pDevice, MTL::CommandQueue* pCommandQueue, MTL
     MTL::Buffer* pOrdCustKeyBuffer = pDevice->newBuffer(o_custkey.data(), orders_size * sizeof(int), MTL::ResourceStorageModeShared);
     MTL::Buffer* pOrdCommentBuffer = pDevice->newBuffer(o_comment.data(), o_comment.size() * sizeof(char), MTL::ResourceStorageModeShared);
     
-    const uint inter_count_size = num_threadgroups * 128;
+    const uint inter_count_size = orders_size; // one slot per order for lossless merge
     MTL::Buffer* pInterCountsBuffer = pDevice->newBuffer(inter_count_size * sizeof(Q13_OrderCount_CPU), MTL::ResourceStorageModeShared);
     
     const uint final_count_ht_size = customer_size * 2; // Larger to reduce collisions
@@ -1311,21 +1297,22 @@ void runQ13Benchmark(MTL::Device* pDevice, MTL::CommandQueue* pCommandQueue, MTL
     pCommandBuffer->waitUntilCompleted();
     double gpuExecutionTime = pCommandBuffer->GPUEndTime() - pCommandBuffer->GPUStartTime();
 
-    // 6. Perform final merge on CPU (The new, optimized Stage 4)
-    Q13_CustDist_CPU* inter_results = (Q13_CustDist_CPU*)pInterHistBuffer->contents();
+    // 6. Perform final merge on CPU (authoritative):
+    // Probe the counts HT for each customer and build the exact histogram.
+    struct Q13_OrderCount_CPU_local { uint custkey; uint order_count; };
+    auto* counts_ht = (Q13_OrderCount_CPU_local*)pFinalCountsHTBuffer->contents();
     std::map<uint, uint> final_histogram;
-    for (uint i = 0; i < inter_hist_size; ++i) {
-        if (inter_results[i].custdist > 0) {
-            final_histogram[inter_results[i].c_count] += inter_results[i].custdist;
+    for (uint i = 0; i < customer_size; ++i) {
+        uint custkey = (uint)c_custkey[i];
+        uint hash_index = custkey % final_count_ht_size;
+        uint order_count = 0;
+        for (uint j = 0; j < final_count_ht_size; ++j) {
+            uint probe_idx = (hash_index + j) % final_count_ht_size;
+            if (counts_ht[probe_idx].custkey == custkey) { order_count = counts_ht[probe_idx].order_count; break; }
+            if (counts_ht[probe_idx].custkey == 0) { break; }
         }
+        final_histogram[order_count] += 1;
     }
-    
-    // Add customers with 0 orders to correctly handle the LEFT JOIN
-    uint total_customers_in_histogram = 0;
-    for(auto const& [key, val] : final_histogram) {
-        total_customers_in_histogram += val;
-    }
-    final_histogram[0] += (customer_size - total_customers_in_histogram);
 
     // 7. Process and print results
     std::vector<Q13Result> final_results;

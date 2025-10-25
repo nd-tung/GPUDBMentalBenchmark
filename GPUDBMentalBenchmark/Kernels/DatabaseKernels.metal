@@ -1787,53 +1787,50 @@ struct Q13_CustDist_Local {
 // KERNEL 1A: Stage 1, Local Count. Scans ORDERS, filters, and does first GROUP BY locally.
 kernel void q13_local_count_kernel(
     const device int* o_custkey,
-    const device char* o_comment, // Assuming fixed-width
+    const device char* o_comment, // fixed-width buffer
     device Q13_OrderCount_Local* intermediate_counts,
     constant uint& orders_size,
     uint group_id [[threadgroup_position_in_grid]],
     uint thread_id_in_group [[thread_index_in_threadgroup]],
     uint threads_per_group [[threads_per_threadgroup]])
 {
-    const int local_ht_size = 128;
-    thread Q13_OrderCount_Local local_ht[local_ht_size];
-    for (int i = thread_id_in_group; i < local_ht_size; i += threads_per_group) {
-        local_ht[i].custkey = 0; // 0 is invalid key
-        local_ht[i].order_count = 0;
-    }
-    threadgroup_barrier(mem_flags::mem_threadgroup);
+    const int comment_len = 100; // matches host fixed-width
+    uint grid_size = threads_per_group * 2048; // matches host dispatch
 
-    uint grid_size = threads_per_group * 2048; // Assume 2048 groups
     for (uint i = (group_id * threads_per_group) + thread_id_in_group; i < orders_size; i += grid_size) {
-        
-        // Filter: o_comment NOT LIKE '%special%requests%'
-        bool match = false;
-        // Simplified search for "special"
-        for(int j = 0; j < 90; ++j) { // O_COMMENT is 100 chars
-            if (o_comment[i * 100 + j] == 's' && o_comment[i * 100 + j + 7] == 'l') { // quick check
-                match = true; // Found "special", so we should SKIP this row
-                break;
+        // Evaluate filter: NOT LIKE '%special%requests%'
+        bool skip = false;
+        for (int j = 0; j <= comment_len - 7; ++j) {
+            if (o_comment[i * comment_len + j + 0] == 's' &&
+                o_comment[i * comment_len + j + 1] == 'p' &&
+                o_comment[i * comment_len + j + 2] == 'e' &&
+                o_comment[i * comment_len + j + 3] == 'c' &&
+                o_comment[i * comment_len + j + 4] == 'i' &&
+                o_comment[i * comment_len + j + 5] == 'a' &&
+                o_comment[i * comment_len + j + 6] == 'l') {
+                for (int k = j + 7; k <= comment_len - 8; ++k) {
+                    if (o_comment[i * comment_len + k + 0] == 'r' &&
+                        o_comment[i * comment_len + k + 1] == 'e' &&
+                        o_comment[i * comment_len + k + 2] == 'q' &&
+                        o_comment[i * comment_len + k + 3] == 'u' &&
+                        o_comment[i * comment_len + k + 4] == 'e' &&
+                        o_comment[i * comment_len + k + 5] == 's' &&
+                        o_comment[i * comment_len + k + 6] == 't' &&
+                        o_comment[i * comment_len + k + 7] == 's') {
+                        skip = true;
+                        break;
+                    }
+                }
+                if (skip) break;
             }
         }
-        if (match) continue;
 
-        // Passed filter, aggregate locally
-        uint custkey = (uint)o_custkey[i];
-        uint hash_index = custkey % local_ht_size;
-        for (int k = 0; k < local_ht_size; ++k) {
-            uint probe_idx = (hash_index + k) % local_ht_size;
-            if (local_ht[probe_idx].custkey == 0 || local_ht[probe_idx].custkey == custkey) {
-                local_ht[probe_idx].custkey = custkey;
-                local_ht[probe_idx].order_count++;
-                break;
-            }
-        }
-    }
-    threadgroup_barrier(mem_flags::mem_threadgroup);
-    
-    // Write local results to global memory
-    for (int i = thread_id_in_group; i < local_ht_size; i += threads_per_group) {
-        if (local_ht[i].custkey != 0) {
-            intermediate_counts[group_id * local_ht_size + i] = local_ht[i];
+        if (!skip) {
+            intermediate_counts[i].custkey = (uint)o_custkey[i];
+            intermediate_counts[i].order_count = 1;
+        } else {
+            intermediate_counts[i].custkey = 0;
+            intermediate_counts[i].order_count = 0;
         }
     }
 }
@@ -1877,7 +1874,7 @@ kernel void q13_local_histogram_kernel(
     uint thread_id_in_group [[thread_index_in_threadgroup]],
     uint threads_per_group [[threads_per_threadgroup]])
 {
-    const int local_ht_size = 32; // Max expected order count is small
+    const int local_ht_size = 64; // Increase to cover observed max c_count (~41 at SF-1)
     thread Q13_CustDist_Local local_ht[local_ht_size];
     for (int i = thread_id_in_group; i < local_ht_size; i += threads_per_group) {
         local_ht[i].c_count = i;
