@@ -29,15 +29,32 @@ KERNELS = $(wildcard $(KERNEL_DIR)/*.metal)
 # Target executable
 TARGET = $(BIN_DIR)/$(PROJECT_NAME)
 
+# Metal compiler tools
+METAL = xcrun -sdk macosx metal
+METALLIB = xcrun -sdk macosx metallib
+KERNEL_AIR = $(BUILD_DIR)/kernels.air
+KERNEL_METALLIB = $(BUILD_DIR)/kernels.metallib
+
 # Default target
 .PHONY: all
-all: $(TARGET)
+all: $(TARGET) $(KERNEL_METALLIB)
 
 # Create target executable
 $(TARGET): $(OBJECTS) | $(BIN_DIR)
 	@echo "Linking $(PROJECT_NAME)..."
 	$(CXX) $(OBJECTS) $(FRAMEWORKS) -o $@
 	@echo "Build complete: $@"
+
+# Build Metal kernels and place fresh metallib alongside the app assets
+$(KERNEL_AIR): $(KERNEL_DIR)/DatabaseKernels.metal | $(BUILD_DIR)
+	@echo "Compiling Metal kernels (.air)..."
+	$(METAL) -c $(KERNEL_DIR)/DatabaseKernels.metal -o $(KERNEL_AIR)
+
+$(KERNEL_METALLIB): $(KERNEL_AIR)
+	@echo "Linking Metal library (.metallib)..."
+	$(METALLIB) $(KERNEL_AIR) -o $(KERNEL_METALLIB)
+	@# Copy to runtime location so device->newLibrary("default.metallib") finds the latest
+	cp $(KERNEL_METALLIB) GPUDBMentalBenchmark/default.metallib
 
 # Compile source files
 $(OBJ_DIR)/%.o: $(SOURCE_DIR)/%.cpp | $(OBJ_DIR)
@@ -50,6 +67,9 @@ $(BIN_DIR):
 
 $(OBJ_DIR):
 	@mkdir -p $(OBJ_DIR)
+
+$(BUILD_DIR):
+	@mkdir -p $(BUILD_DIR)
 
 # Clean build artifacts
 .PHONY: clean
@@ -74,50 +94,50 @@ uninstall:
 
 # Run the program (default: all queries with SF-10)
 .PHONY: run
-run: $(TARGET)
+run: $(TARGET) $(KERNEL_METALLIB)
 	@echo "Running $(PROJECT_NAME)..."
 	@cd GPUDBMentalBenchmark && ../$(TARGET)
 
 # Run with different datasets
 .PHONY: run-sf1
-run-sf1: $(TARGET)
+run-sf1: $(TARGET) $(KERNEL_METALLIB)
 	@echo "Running $(PROJECT_NAME) with SF-1 dataset..."
 	@cd GPUDBMentalBenchmark && ../$(TARGET) sf1
 
 .PHONY: run-sf10
-run-sf10: $(TARGET)
+run-sf10: $(TARGET) $(KERNEL_METALLIB)
 	@echo "Running $(PROJECT_NAME) with SF-10 dataset..."
 	@cd GPUDBMentalBenchmark && ../$(TARGET) sf10
 
 # Run TPC-H Query benchmarks individually
 .PHONY: run-q1
-run-q1: $(TARGET)
+run-q1: $(TARGET) $(KERNEL_METALLIB)
 	@echo "Running TPC-H Query 1 benchmark..."
 	@cd GPUDBMentalBenchmark && ../$(TARGET) q1
 
 .PHONY: run-q3
-run-q3: $(TARGET)
+run-q3: $(TARGET) $(KERNEL_METALLIB)
 	@echo "Running TPC-H Query 3 benchmark..."
 	@cd GPUDBMentalBenchmark && ../$(TARGET) q3
 
 .PHONY: run-q6
-run-q6: $(TARGET)
+run-q6: $(TARGET) $(KERNEL_METALLIB)
 	@echo "Running TPC-H Query 6 benchmark..."
 	@cd GPUDBMentalBenchmark && ../$(TARGET) q6
 
 .PHONY: run-q9
-run-q9: $(TARGET)
+run-q9: $(TARGET) $(KERNEL_METALLIB)
 	@echo "Running TPC-H Query 9 benchmark..."
 	@cd GPUDBMentalBenchmark && ../$(TARGET) q9
 
 .PHONY: run-q13
-run-q13: $(TARGET)
+run-q13: $(TARGET) $(KERNEL_METALLIB)
 	@echo "Running TPC-H Query 13 benchmark..."
 	@cd GPUDBMentalBenchmark && ../$(TARGET) q13
 
 # Run all TPC-H queries
 .PHONY: run-all-queries
-run-all-queries: $(TARGET)
+run-all-queries: $(TARGET) $(KERNEL_METALLIB)
 	@echo "Running all TPC-H Query benchmarks..."
 	@cd GPUDBMentalBenchmark && ../$(TARGET)
 

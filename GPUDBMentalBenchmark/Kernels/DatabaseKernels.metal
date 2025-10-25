@@ -261,6 +261,621 @@ kernel void q1_local_aggregation_kernel(
 }
 
 
+// --- Q1 GPU-centric path: Direct global accumulation + GPU compaction ---
+// This approach avoids multi-stage local/global merges and uses fixed per-key accumulators.
+// Keys are packed as 16-bit: (returnflag << 8) | linestatus, so we use tables of size 65536.
+
+// Kernel A: Stream all rows, apply selection, and atomically accumulate per-key aggregates.
+kernel void q1_gpu_accumulate_kernel(
+    const device int*   l_shipdate,
+    const device char*  l_returnflag,
+    const device char*  l_linestatus,
+    const device float* l_quantity,
+    const device float* l_extendedprice,
+    const device float* l_discount,
+    const device float* l_tax,
+    device atomic_float* g_sum_qty,
+    device atomic_float* g_sum_base_price,
+    device atomic_float* g_sum_disc_price,
+    device atomic_float* g_sum_charge,
+    device atomic_float* g_sum_discount,
+    device atomic_uint*  g_count,
+    constant uint& data_size,
+    constant int& cutoff_date, // e.g., 19980902 (1998-12-01 - 90 days)
+    uint group_id [[threadgroup_position_in_grid]],
+    uint thread_id_in_group [[thread_index_in_threadgroup]],
+    uint threads_per_group [[threads_per_threadgroup]])
+{
+    // Per-thread small accumulator to reduce global atomic contention
+    const int CAP = 8;
+    short keys[CAP];
+    float sum_qty[CAP];
+    float sum_base[CAP];
+    float sum_disc_price[CAP];
+    float sum_charge[CAP];
+    float sum_discount[CAP];
+    uint  cnt[CAP];
+    for (int s = 0; s < CAP; ++s) {
+        keys[s] = (short)-1;
+        sum_qty[s] = 0.0f;
+        sum_base[s] = 0.0f;
+        sum_disc_price[s] = 0.0f;
+        sum_charge[s] = 0.0f;
+        sum_discount[s] = 0.0f;
+        cnt[s] = 0u;
+    }
+
+    uint grid_size = threads_per_group * 2048; // matches host dispatch
+    for (uint i = (group_id * threads_per_group) + thread_id_in_group; i < data_size; i += grid_size) {
+        if (l_shipdate[i] <= cutoff_date) {
+            short key = (short)(((uchar)l_returnflag[i] << 8) | (uchar)l_linestatus[i]);
+            float qty = l_quantity[i];
+            float base = l_extendedprice[i];
+            float one_minus_disc = (1.0f - l_discount[i]);
+            float disc_price = base * one_minus_disc;
+            float charge = disc_price * (1.0f + l_tax[i]);
+            float disc = l_discount[i];
+
+            bool placed = false;
+            // Try to place/update in local accumulator
+            for (int s = 0; s < CAP; ++s) {
+                short k = keys[s];
+                if (k == key) {
+                    sum_qty[s] += qty;
+                    sum_base[s] += base;
+                    sum_disc_price[s] += disc_price;
+                    sum_charge[s] += charge;
+                    sum_discount[s] += disc;
+                    cnt[s] += 1u;
+                    placed = true; break;
+                } else if (k == (short)-1) {
+                    keys[s] = key;
+                    sum_qty[s] = qty;
+                    sum_base[s] = base;
+                    sum_disc_price[s] = disc_price;
+                    sum_charge[s] = charge;
+                    sum_discount[s] = disc;
+                    cnt[s] = 1u;
+                    placed = true; break;
+                }
+            }
+            if (!placed) {
+                // Fallback: flush this single row directly to global accumulators
+                ushort idx = (ushort)key;
+                atomic_fetch_add_explicit(&g_sum_qty[idx], qty, memory_order_relaxed);
+                atomic_fetch_add_explicit(&g_sum_base_price[idx], base, memory_order_relaxed);
+                atomic_fetch_add_explicit(&g_sum_disc_price[idx], disc_price, memory_order_relaxed);
+                atomic_fetch_add_explicit(&g_sum_charge[idx], charge, memory_order_relaxed);
+                atomic_fetch_add_explicit(&g_sum_discount[idx], disc, memory_order_relaxed);
+                atomic_fetch_add_explicit(&g_count[idx], 1u, memory_order_relaxed);
+            }
+        }
+    }
+
+    // Flush per-thread accumulators to global
+    for (int s = 0; s < CAP; ++s) {
+        if (keys[s] != (short)-1) {
+            ushort idx = (ushort)keys[s];
+            atomic_fetch_add_explicit(&g_sum_qty[idx], sum_qty[s], memory_order_relaxed);
+            atomic_fetch_add_explicit(&g_sum_base_price[idx], sum_base[s], memory_order_relaxed);
+            atomic_fetch_add_explicit(&g_sum_disc_price[idx], sum_disc_price[s], memory_order_relaxed);
+            atomic_fetch_add_explicit(&g_sum_charge[idx], sum_charge[s], memory_order_relaxed);
+            atomic_fetch_add_explicit(&g_sum_discount[idx], sum_discount[s], memory_order_relaxed);
+            atomic_fetch_add_explicit(&g_count[idx], cnt[s], memory_order_relaxed);
+        }
+    }
+}
+
+// Optimized variant: use threadgroup-local aggregation to drastically reduce global atomics.
+kernel void q1_gpu_tg_accumulate_kernel(
+    const device int*   l_shipdate,
+    const device char*  l_returnflag,
+    const device char*  l_linestatus,
+    const device float* l_quantity,
+    const device float* l_extendedprice,
+    const device float* l_discount,
+    const device float* l_tax,
+    device atomic_float* g_sum_qty,
+    device atomic_float* g_sum_base_price,
+    device atomic_float* g_sum_disc_price,
+    device atomic_float* g_sum_charge,
+    device atomic_float* g_sum_discount,
+    device atomic_uint*  g_count,
+    constant uint& data_size,
+    constant int& cutoff_date,
+    uint group_id [[threadgroup_position_in_grid]],
+    uint thread_id_in_group [[thread_index_in_threadgroup]],
+    uint threads_per_group [[threads_per_threadgroup]])
+{
+    const int TG_SIZE = 64; // small threadgroup hash table
+    // Threadgroup-local hash table storing aggregates per key
+    threadgroup int tg_keys[TG_SIZE];
+    threadgroup float tg_sum_qty[TG_SIZE];
+    threadgroup float tg_sum_base[TG_SIZE];
+    threadgroup float tg_sum_disc_price[TG_SIZE];
+    threadgroup float tg_sum_charge[TG_SIZE];
+    threadgroup float tg_sum_discount[TG_SIZE];
+    threadgroup uint tg_cnt[TG_SIZE];
+    threadgroup atomic_int tg_locks[TG_SIZE]; // 0 = unlocked, 1 = locked
+
+    // Initialize threadgroup table
+    for (int i = thread_id_in_group; i < TG_SIZE; i += threads_per_group) {
+        tg_keys[i] = -1;
+        tg_sum_qty[i] = 0.0f;
+        tg_sum_base[i] = 0.0f;
+        tg_sum_disc_price[i] = 0.0f;
+        tg_sum_charge[i] = 0.0f;
+        tg_sum_discount[i] = 0.0f;
+        tg_cnt[i] = 0u;
+        atomic_store_explicit(&tg_locks[i], 0, memory_order_relaxed);
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+
+    // Per-thread small accumulator
+    const int CAP = 8;
+    short keys[CAP];
+    float sum_qty[CAP];
+    float sum_base[CAP];
+    float sum_disc_price[CAP];
+    float sum_charge[CAP];
+    float sum_discount[CAP];
+    uint  cnt[CAP];
+    for (int s = 0; s < CAP; ++s) {
+        keys[s] = (short)-1;
+        sum_qty[s] = 0.0f; sum_base[s] = 0.0f; sum_disc_price[s] = 0.0f;
+        sum_charge[s] = 0.0f; sum_discount[s] = 0.0f; cnt[s] = 0u;
+    }
+
+    uint grid_size = threads_per_group * 2048;
+    for (uint i = (group_id * threads_per_group) + thread_id_in_group; i < data_size; i += grid_size) {
+        if (l_shipdate[i] <= cutoff_date) {
+            short key = (short)(((uchar)l_returnflag[i] << 8) | (uchar)l_linestatus[i]);
+            float qty = l_quantity[i];
+            float base = l_extendedprice[i];
+            float one_minus_disc = (1.0f - l_discount[i]);
+            float disc_price = base * one_minus_disc;
+            float charge = disc_price * (1.0f + l_tax[i]);
+            float disc = l_discount[i];
+
+            bool placed = false;
+            for (int s = 0; s < CAP; ++s) {
+                short k = keys[s];
+                if (k == key) {
+                    sum_qty[s] += qty; sum_base[s] += base; sum_disc_price[s] += disc_price;
+                    sum_charge[s] += charge; sum_discount[s] += disc; cnt[s] += 1u; placed = true; break;
+                } else if (k == (short)-1) {
+                    keys[s] = key; sum_qty[s] = qty; sum_base[s] = base; sum_disc_price[s] = disc_price;
+                    sum_charge[s] = charge; sum_discount[s] = disc; cnt[s] = 1u; placed = true; break;
+                }
+            }
+            if (!placed) {
+                // Spill directly to threadgroup table
+                uint h = (uint)(ushort)key % TG_SIZE;
+                for (uint j = 0; j < (uint)TG_SIZE; ++j) {
+                    uint p = (h + j) % TG_SIZE;
+                    int expected_lock = 0;
+                    if (atomic_compare_exchange_weak_explicit(&tg_locks[p], &expected_lock, 1, memory_order_relaxed, memory_order_relaxed)) {
+                        // critical section
+                        if (tg_keys[p] == -1) {
+                            tg_keys[p] = (int)key;
+                            tg_sum_qty[p] += qty;
+                            tg_sum_base[p] += base;
+                            tg_sum_disc_price[p] += disc_price;
+                            tg_sum_charge[p] += charge;
+                            tg_sum_discount[p] += disc;
+                            tg_cnt[p] += 1u;
+                            atomic_store_explicit(&tg_locks[p], 0, memory_order_relaxed);
+                            break;
+                        } else if (tg_keys[p] == (int)key) {
+                            tg_sum_qty[p] += qty;
+                            tg_sum_base[p] += base;
+                            tg_sum_disc_price[p] += disc_price;
+                            tg_sum_charge[p] += charge;
+                            tg_sum_discount[p] += disc;
+                            tg_cnt[p] += 1u;
+                            atomic_store_explicit(&tg_locks[p], 0, memory_order_relaxed);
+                            break;
+                        }
+                        // release lock and continue probing
+                        atomic_store_explicit(&tg_locks[p], 0, memory_order_relaxed);
+                    }
+                }
+            }
+        }
+    }
+
+    // Merge per-thread accumulators into threadgroup table
+    for (int s = 0; s < CAP; ++s) {
+        if (keys[s] != (short)-1) {
+            short key = keys[s];
+            uint h = (uint)(ushort)key % TG_SIZE;
+            for (uint j = 0; j < (uint)TG_SIZE; ++j) {
+                uint p = (h + j) % TG_SIZE;
+                int expected_lock = 0;
+                if (atomic_compare_exchange_weak_explicit(&tg_locks[p], &expected_lock, 1, memory_order_relaxed, memory_order_relaxed)) {
+                    if (tg_keys[p] == -1) {
+                        tg_keys[p] = (int)key;
+                        tg_sum_qty[p] += sum_qty[s];
+                        tg_sum_base[p] += sum_base[s];
+                        tg_sum_disc_price[p] += sum_disc_price[s];
+                        tg_sum_charge[p] += sum_charge[s];
+                        tg_sum_discount[p] += sum_discount[s];
+                        tg_cnt[p] += cnt[s];
+                        atomic_store_explicit(&tg_locks[p], 0, memory_order_relaxed);
+                        break;
+                    } else if (tg_keys[p] == (int)key) {
+                        tg_sum_qty[p] += sum_qty[s];
+                        tg_sum_base[p] += sum_base[s];
+                        tg_sum_disc_price[p] += sum_disc_price[s];
+                        tg_sum_charge[p] += sum_charge[s];
+                        tg_sum_discount[p] += sum_discount[s];
+                        tg_cnt[p] += cnt[s];
+                        atomic_store_explicit(&tg_locks[p], 0, memory_order_relaxed);
+                        break;
+                    }
+                    atomic_store_explicit(&tg_locks[p], 0, memory_order_relaxed);
+                }
+            }
+        }
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+
+    // Flush threadgroup table to global accumulators (each thread handles strided slots)
+    for (int i = thread_id_in_group; i < TG_SIZE; i += threads_per_group) {
+        int k = tg_keys[i];
+        if (k != -1) {
+            ushort idx = (ushort)k;
+            float tq = tg_sum_qty[i];
+            float tb = tg_sum_base[i];
+            float td = tg_sum_disc_price[i];
+            float tc = tg_sum_charge[i];
+            float tdisc = tg_sum_discount[i];
+            uint  tcnt = tg_cnt[i];
+
+            atomic_fetch_add_explicit(&g_sum_qty[idx], tq, memory_order_relaxed);
+            atomic_fetch_add_explicit(&g_sum_base_price[idx], tb, memory_order_relaxed);
+            atomic_fetch_add_explicit(&g_sum_disc_price[idx], td, memory_order_relaxed);
+            atomic_fetch_add_explicit(&g_sum_charge[idx], tc, memory_order_relaxed);
+            atomic_fetch_add_explicit(&g_sum_discount[idx], tdisc, memory_order_relaxed);
+            atomic_fetch_add_explicit(&g_count[idx], tcnt, memory_order_relaxed);
+        }
+    }
+}
+
+// Kernel B: Compact non-empty keys into a dense output array for host consumption.
+// Reuses Q1Aggregates_Local as the output record format.
+kernel void q1_compact_results_kernel(
+    const device atomic_float* g_sum_qty,
+    const device atomic_float* g_sum_base_price,
+    const device atomic_float* g_sum_disc_price,
+    const device atomic_float* g_sum_charge,
+    const device atomic_float* g_sum_discount,
+    const device atomic_uint*  g_count,
+    device Q1Aggregates_Local* out_results,
+    device atomic_uint* out_count,
+    constant uint& table_size, // should be 65536
+    uint index [[thread_position_in_grid]])
+{
+    if (index >= table_size) return;
+    uint c = atomic_load_explicit(&g_count[index], memory_order_relaxed);
+    if (c == 0) return;
+
+    uint pos = atomic_fetch_add_explicit(out_count, 1u, memory_order_relaxed);
+    Q1Aggregates_Local rec;
+    rec.key = (int)index;
+    rec.sum_qty = atomic_load_explicit(&g_sum_qty[index], memory_order_relaxed);
+    rec.sum_base_price = atomic_load_explicit(&g_sum_base_price[index], memory_order_relaxed);
+    rec.sum_disc_price = atomic_load_explicit(&g_sum_disc_price[index], memory_order_relaxed);
+    rec.sum_charge = atomic_load_explicit(&g_sum_charge[index], memory_order_relaxed);
+    rec.sum_discount = atomic_load_explicit(&g_sum_discount[index], memory_order_relaxed);
+    rec.count = c;
+    out_results[pos] = rec;
+}
+
+// --- Q1 Specialized low-cardinality bins path ---
+// Exploits the fact that Q1 groups only by l_returnflag in {A,N,R} and l_linestatus in {F,O}.
+// We maintain 6 bins: (A,F)=0, (A,O)=1, (N,F)=2, (N,O)=3, (R,F)=4, (R,O)=5.
+inline int q1_rf_index(char rf) {
+    return (rf == 'A') ? 0 : (rf == 'N') ? 1 : (rf == 'R') ? 2 : -1;
+}
+inline int q1_ls_index(char ls) {
+    return (ls == 'F') ? 0 : (ls == 'O') ? 1 : -1;
+}
+
+kernel void q1_bins_accumulate_kernel(
+    const device int*   l_shipdate,
+    const device char*  l_returnflag,
+    const device char*  l_linestatus,
+    const device float* l_quantity,
+    const device float* l_extendedprice,
+    const device float* l_discount,
+    const device float* l_tax,
+    device atomic_float* g_sum_qty_bins,
+    device atomic_float* g_sum_base_bins,
+    device atomic_float* g_sum_disc_price_bins,
+    device atomic_float* g_sum_charge_bins,
+    device atomic_float* g_sum_discount_bins,
+    device atomic_uint*  g_count_bins,
+    constant uint& data_size,
+    constant int& cutoff_date,
+    uint group_id [[threadgroup_position_in_grid]],
+    uint thread_id_in_group [[thread_index_in_threadgroup]],
+    uint threads_per_group [[threads_per_threadgroup]])
+{
+    const int BINS = 6;
+    float sum_qty[BINS];
+    float sum_base[BINS];
+    float sum_disc_price[BINS];
+    float sum_charge[BINS];
+    float sum_discount[BINS];
+    uint  cnt[BINS];
+    for (int b = 0; b < BINS; ++b) { sum_qty[b] = 0.0f; sum_base[b] = 0.0f; sum_disc_price[b] = 0.0f; sum_charge[b] = 0.0f; sum_discount[b] = 0.0f; cnt[b] = 0u; }
+
+    uint grid_size = threads_per_group * 1024; // tuneable number of threadgroups assumed in host
+    for (uint i = (group_id * threads_per_group) + thread_id_in_group; i < data_size; i += grid_size) {
+        if (l_shipdate[i] > cutoff_date) continue;
+        int rfi = q1_rf_index(l_returnflag[i]);
+        if (rfi < 0) continue;
+        int lsi = q1_ls_index(l_linestatus[i]);
+        if (lsi < 0) continue;
+        int bin = rfi * 2 + lsi; // 0..5
+        float base = l_extendedprice[i];
+        float qty = l_quantity[i];
+        float disc = l_discount[i];
+        float disc_price = base * (1.0f - disc);
+        float charge = disc_price * (1.0f + l_tax[i]);
+        sum_qty[bin] += qty;
+        sum_base[bin] += base;
+        sum_disc_price[bin] += disc_price;
+        sum_charge[bin] += charge;
+        sum_discount[bin] += disc;
+        cnt[bin] += 1u;
+    }
+
+    // Flush per-thread accumulators to global bins (6 atomics per metric per thread)
+    for (int b = 0; b < BINS; ++b) {
+        uint c = cnt[b];
+        if (c == 0) continue;
+        atomic_fetch_add_explicit(&g_sum_qty_bins[b], sum_qty[b], memory_order_relaxed);
+        atomic_fetch_add_explicit(&g_sum_base_bins[b], sum_base[b], memory_order_relaxed);
+        atomic_fetch_add_explicit(&g_sum_disc_price_bins[b], sum_disc_price[b], memory_order_relaxed);
+        atomic_fetch_add_explicit(&g_sum_charge_bins[b], sum_charge[b], memory_order_relaxed);
+        atomic_fetch_add_explicit(&g_sum_discount_bins[b], sum_discount[b], memory_order_relaxed);
+        atomic_fetch_add_explicit(&g_count_bins[b], c, memory_order_relaxed);
+    }
+}
+
+// --- Q1 Integer-cent two-pass path ---
+// Stage 1: Per-thread local accumulation into 6 bins using integer cents (and basis points),
+// then threadgroup reduction to one partial per bin per threadgroup. No atomics used.
+// Monetary fields are accumulated in cents (int64). Discount is accumulated in basis points (bp, int32).
+kernel void q1_bins_accumulate_int_stage1(
+    const device int*   l_shipdate,
+    const device char*  l_returnflag,
+    const device char*  l_linestatus,
+    const device float* l_quantity,
+    const device float* l_extendedprice,
+    const device float* l_discount,
+    const device float* l_tax,
+    // Outputs: one partial per threadgroup per bin (size = num_threadgroups * 6)
+    device long*  p_sum_qty_cents,        // int64
+    device long*  p_sum_base_cents,       // int64
+    device long*  p_sum_disc_price_cents, // int64
+    device long*  p_sum_charge_cents,     // int64
+    device uint*  p_sum_discount_bp,      // uint32 (sum of basis points)
+    device uint*  p_count,                // uint32
+    constant uint& data_size,
+    constant int&  cutoff_date,
+    constant uint& num_threadgroups,
+    uint group_id [[threadgroup_position_in_grid]],
+    uint thread_id_in_group [[thread_index_in_threadgroup]],
+    uint threads_per_group [[threads_per_threadgroup]])
+{
+    const int BINS = 6;
+    // Per-thread local accumulators in integer units
+    long sum_qty_c[BINS];
+    long sum_base_c[BINS];
+    long sum_disc_c[BINS];
+    long sum_charge_c[BINS];
+    uint sum_disc_bp[BINS];
+    uint cnt[BINS];
+    for (int b = 0; b < BINS; ++b) { sum_qty_c[b]=0; sum_base_c[b]=0; sum_disc_c[b]=0; sum_charge_c[b]=0; sum_disc_bp[b]=0u; cnt[b]=0u; }
+
+    // Grid stride loop using actual dispatched num_threadgroups
+    uint grid_size = threads_per_group * num_threadgroups;
+    for (uint i = (group_id * threads_per_group) + thread_id_in_group; i < data_size; i += grid_size) {
+        if (l_shipdate[i] > cutoff_date) continue;
+        int rfi = q1_rf_index(l_returnflag[i]); if (rfi < 0) continue;
+        int lsi = q1_ls_index(l_linestatus[i]); if (lsi < 0) continue;
+        int bin = rfi * 2 + lsi; // 0..5
+
+        // Convert to integer units with half-up rounding (data are non-negative)
+        float base = l_extendedprice[i];
+        float qty  = l_quantity[i];
+        float d    = l_discount[i];
+        float t    = l_tax[i];
+
+        long base_c = (long)floor(base * 100.0f + 0.5f);
+        long qty_c  = (long)floor(qty  * 100.0f + 0.5f);
+        int  d_bp   = (int)floor(d * 100.0f + 0.5f);   // basis points of discount percentage
+        int  t_bp   = (int)floor(t * 100.0f + 0.5f);   // basis points of tax percentage
+
+        // disc_price_cents = round_to_cents(base_cents * (100 - d_bp) / 100)
+        long disc_c = (base_c * (long)(100 - d_bp) + 50) / 100;
+        // charge_cents = round_to_cents(disc_cents * (100 + t_bp) / 100)
+        long charge_c = (disc_c * (long)(100 + t_bp) + 50) / 100;
+
+        sum_qty_c[bin]      += qty_c;
+        sum_base_c[bin]     += base_c;
+        sum_disc_c[bin]     += disc_c;
+        sum_charge_c[bin]   += charge_c;
+        sum_disc_bp[bin]    += (uint)d_bp;
+        cnt[bin]            += 1u;
+    }
+
+    // Threadgroup reduction: reuse a single shared array for 64-bit and 32-bit reductions
+    threadgroup long tg64[1024];
+    threadgroup uint tg32[1024];
+
+    // For each bin, reduce each metric across threads, then write one partial per bin
+    for (int b = 0; b < BINS; ++b) {
+        // qty_cents
+        tg64[thread_id_in_group] = sum_qty_c[b];
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+        {
+            uint n = threads_per_group;
+            uint p2 = 1u << (31 - clz(n));
+            uint tail = n - p2;
+            if (thread_id_in_group < tail) {
+                tg64[thread_id_in_group] += tg64[thread_id_in_group + p2];
+            }
+            threadgroup_barrier(mem_flags::mem_threadgroup);
+            for (uint stride = p2 / 2; stride > 0; stride /= 2) {
+                if (thread_id_in_group < stride) tg64[thread_id_in_group] += tg64[thread_id_in_group + stride];
+                threadgroup_barrier(mem_flags::mem_threadgroup);
+            }
+            if (thread_id_in_group == 0) { p_sum_qty_cents[group_id * BINS + b] = tg64[0]; }
+            threadgroup_barrier(mem_flags::mem_threadgroup);
+        }
+
+        // base_cents
+        tg64[thread_id_in_group] = sum_base_c[b];
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+        {
+            uint n = threads_per_group;
+            uint p2 = 1u << (31 - clz(n));
+            uint tail = n - p2;
+            if (thread_id_in_group < tail) {
+                tg64[thread_id_in_group] += tg64[thread_id_in_group + p2];
+            }
+            threadgroup_barrier(mem_flags::mem_threadgroup);
+            for (uint stride = p2 / 2; stride > 0; stride /= 2) {
+                if (thread_id_in_group < stride) tg64[thread_id_in_group] += tg64[thread_id_in_group + stride];
+                threadgroup_barrier(mem_flags::mem_threadgroup);
+            }
+            if (thread_id_in_group == 0) { p_sum_base_cents[group_id * BINS + b] = tg64[0]; }
+            threadgroup_barrier(mem_flags::mem_threadgroup);
+        }
+
+        // disc_price_cents
+        tg64[thread_id_in_group] = sum_disc_c[b];
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+        {
+            uint n = threads_per_group;
+            uint p2 = 1u << (31 - clz(n));
+            uint tail = n - p2;
+            if (thread_id_in_group < tail) {
+                tg64[thread_id_in_group] += tg64[thread_id_in_group + p2];
+            }
+            threadgroup_barrier(mem_flags::mem_threadgroup);
+            for (uint stride = p2 / 2; stride > 0; stride /= 2) {
+                if (thread_id_in_group < stride) tg64[thread_id_in_group] += tg64[thread_id_in_group + stride];
+                threadgroup_barrier(mem_flags::mem_threadgroup);
+            }
+            if (thread_id_in_group == 0) { p_sum_disc_price_cents[group_id * BINS + b] = tg64[0]; }
+            threadgroup_barrier(mem_flags::mem_threadgroup);
+        }
+
+        // charge_cents
+        tg64[thread_id_in_group] = sum_charge_c[b];
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+        {
+            uint n = threads_per_group;
+            uint p2 = 1u << (31 - clz(n));
+            uint tail = n - p2;
+            if (thread_id_in_group < tail) {
+                tg64[thread_id_in_group] += tg64[thread_id_in_group + p2];
+            }
+            threadgroup_barrier(mem_flags::mem_threadgroup);
+            for (uint stride = p2 / 2; stride > 0; stride /= 2) {
+                if (thread_id_in_group < stride) tg64[thread_id_in_group] += tg64[thread_id_in_group + stride];
+                threadgroup_barrier(mem_flags::mem_threadgroup);
+            }
+            if (thread_id_in_group == 0) { p_sum_charge_cents[group_id * BINS + b] = tg64[0]; }
+            threadgroup_barrier(mem_flags::mem_threadgroup);
+        }
+
+        // sum_discount_bp
+        tg32[thread_id_in_group] = sum_disc_bp[b];
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+        {
+            uint n = threads_per_group;
+            uint p2 = 1u << (31 - clz(n));
+            uint tail = n - p2;
+            if (thread_id_in_group < tail) {
+                tg32[thread_id_in_group] += tg32[thread_id_in_group + p2];
+            }
+            threadgroup_barrier(mem_flags::mem_threadgroup);
+            for (uint stride = p2 / 2; stride > 0; stride /= 2) {
+                if (thread_id_in_group < stride) tg32[thread_id_in_group] += tg32[thread_id_in_group + stride];
+                threadgroup_barrier(mem_flags::mem_threadgroup);
+            }
+            if (thread_id_in_group == 0) { p_sum_discount_bp[group_id * BINS + b] = tg32[0]; }
+            threadgroup_barrier(mem_flags::mem_threadgroup);
+        }
+
+        // count
+        tg32[thread_id_in_group] = cnt[b];
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+        {
+            uint n = threads_per_group;
+            uint p2 = 1u << (31 - clz(n));
+            uint tail = n - p2;
+            if (thread_id_in_group < tail) {
+                tg32[thread_id_in_group] += tg32[thread_id_in_group + p2];
+            }
+            threadgroup_barrier(mem_flags::mem_threadgroup);
+            for (uint stride = p2 / 2; stride > 0; stride /= 2) {
+                if (thread_id_in_group < stride) tg32[thread_id_in_group] += tg32[thread_id_in_group + stride];
+                threadgroup_barrier(mem_flags::mem_threadgroup);
+            }
+            if (thread_id_in_group == 0) { p_count[group_id * BINS + b] = tg32[0]; }
+            threadgroup_barrier(mem_flags::mem_threadgroup);
+        }
+    }
+}
+
+// Stage 2: Reduce per-threadgroup partials into final 6-bin results (all on GPU).
+kernel void q1_bins_reduce_int_stage2(
+    const device long* p_sum_qty_cents,
+    const device long* p_sum_base_cents,
+    const device long* p_sum_disc_price_cents,
+    const device long* p_sum_charge_cents,
+    const device uint* p_sum_discount_bp,
+    const device uint* p_count,
+    device long* out_sum_qty_cents,
+    device long* out_sum_base_cents,
+    device long* out_sum_disc_price_cents,
+    device long* out_sum_charge_cents,
+    device uint* out_sum_discount_bp,
+    device uint* out_count,
+    constant uint& num_threadgroups,
+    uint index [[thread_position_in_grid]])
+{
+    // Use a single thread to perform small reductions per bin
+    if (index != 0) return;
+    const uint BINS = 6;
+    for (uint b = 0; b < BINS; ++b) {
+        long s_qty = 0, s_base = 0, s_disc = 0, s_charge = 0;
+        uint s_dbp = 0, s_cnt = 0;
+        for (uint g = 0; g < num_threadgroups; ++g) {
+            uint idx = g * BINS + b;
+            s_qty    += p_sum_qty_cents[idx];
+            s_base   += p_sum_base_cents[idx];
+            s_disc   += p_sum_disc_price_cents[idx];
+            s_charge += p_sum_charge_cents[idx];
+            s_dbp    += p_sum_discount_bp[idx];
+            s_cnt    += p_count[idx];
+        }
+        out_sum_qty_cents[b]        = s_qty;
+        out_sum_base_cents[b]       = s_base;
+        out_sum_disc_price_cents[b] = s_disc;
+        out_sum_charge_cents[b]     = s_charge;
+        out_sum_discount_bp[b]      = s_dbp;
+        out_count[b]                = s_cnt;
+    }
+}
+
 // STAGE 2: A second kernel merges the many small local results into one final hash table.
 kernel void q1_merge_kernel(
     const device Q1Aggregates_Local* intermediate_results,

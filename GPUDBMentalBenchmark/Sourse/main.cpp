@@ -419,126 +419,167 @@ void runQ1Benchmark(MTL::Device* device, MTL::CommandQueue* commandQueue, MTL::L
     auto l_discount = loadFloatColumn(filepath, 6), l_tax = loadFloatColumn(filepath, 7);
     auto l_shipdate = loadDateColumn(filepath, 10);
     const uint data_size = (uint)l_shipdate.size();
+    if (data_size == 0) { std::cerr << "Q1: no data loaded" << std::endl; return; }
 
+    // Create pipelines for Integer-cent two-pass Q1
     NS::Error* error = nullptr;
-    NS::String* selectionFunctionName = NS::String::string("selection_kernel", NS::UTF8StringEncoding);
-    MTL::Function* selectionFunction = library->newFunction(selectionFunctionName);
-    MTL::ComputePipelineState* selectionPipeline = device->newComputePipelineState(selectionFunction, &error);
+    MTL::Function* stage1Fn = library->newFunction(NS::String::string("q1_bins_accumulate_int_stage1", NS::UTF8StringEncoding));
+    MTL::ComputePipelineState* stage1PSO = device->newComputePipelineState(stage1Fn, &error);
+    if (!stage1PSO) { std::cerr << "Failed to create q1_bins_accumulate_int_stage1 PSO" << std::endl; return; }
+    MTL::Function* stage2Fn = library->newFunction(NS::String::string("q1_bins_reduce_int_stage2", NS::UTF8StringEncoding));
+    MTL::ComputePipelineState* stage2PSO = device->newComputePipelineState(stage2Fn, &error);
+    if (!stage2PSO) { std::cerr << "Failed to create q1_bins_reduce_int_stage2 PSO" << std::endl; return; }
 
-    NS::String* localAggFunctionName = NS::String::string("q1_local_aggregation_kernel", NS::UTF8StringEncoding);
-    MTL::Function* localAggFunction = library->newFunction(localAggFunctionName);
-    MTL::ComputePipelineState* localAggPipeline = device->newComputePipelineState(localAggFunction, &error);
-
-    NS::String* mergeFunctionName = NS::String::string("q1_merge_kernel", NS::UTF8StringEncoding);
-    MTL::Function* mergeFunction = library->newFunction(mergeFunctionName);
-    MTL::ComputePipelineState* mergePipeline = device->newComputePipelineState(mergeFunction, &error);
-
+    // Create buffers for columns
     MTL::Buffer* shipdateBuffer = device->newBuffer(l_shipdate.data(), data_size * sizeof(int), MTL::ResourceStorageModeShared);
-    MTL::Buffer* bitmapBuffer = device->newBuffer(data_size * sizeof(unsigned int), MTL::ResourceStorageModeShared);
     MTL::Buffer* flagBuffer = device->newBuffer(l_returnflag.data(), data_size * sizeof(char), MTL::ResourceStorageModeShared);
     MTL::Buffer* statusBuffer = device->newBuffer(l_linestatus.data(), data_size * sizeof(char), MTL::ResourceStorageModeShared);
     MTL::Buffer* qtyBuffer = device->newBuffer(l_quantity.data(), data_size * sizeof(float), MTL::ResourceStorageModeShared);
     MTL::Buffer* priceBuffer = device->newBuffer(l_extendedprice.data(), data_size * sizeof(float), MTL::ResourceStorageModeShared);
     MTL::Buffer* discBuffer = device->newBuffer(l_discount.data(), data_size * sizeof(float), MTL::ResourceStorageModeShared);
     MTL::Buffer* taxBuffer = device->newBuffer(l_tax.data(), data_size * sizeof(float), MTL::ResourceStorageModeShared);
-    
-    const uint num_threadgroups = 2048;
-    const uint local_ht_size = 16;
-    const uint intermediate_size = num_threadgroups * local_ht_size;
-    MTL::Buffer* intermediateBuffer = device->newBuffer(intermediate_size * sizeof(Q1Aggregates_CPU), MTL::ResourceStorageModeShared);
 
-    const uint final_ht_size = 64;
-    std::vector<int> cpuFinalHashTable(final_ht_size * (sizeof(Q1Aggregates_CPU)/sizeof(int)), -1);
-    MTL::Buffer* finalHashTableBuffer = device->newBuffer(cpuFinalHashTable.data(), final_ht_size * sizeof(Q1Aggregates_CPU), MTL::ResourceStorageModeShared);
+    // Buffers for two-pass integer-cent path
+    const uint bins = 6;
+    const uint num_threadgroups = 1024; // also passed to stage2
 
+    // Stage 1 partials: size = num_threadgroups * bins
+    MTL::Buffer* p_sumQtyCents = device->newBuffer(num_threadgroups * bins * sizeof(long), MTL::ResourceStorageModeShared);
+    MTL::Buffer* p_sumBaseCents = device->newBuffer(num_threadgroups * bins * sizeof(long), MTL::ResourceStorageModeShared);
+    MTL::Buffer* p_sumDiscPriceCents = device->newBuffer(num_threadgroups * bins * sizeof(long), MTL::ResourceStorageModeShared);
+    MTL::Buffer* p_sumChargeCents = device->newBuffer(num_threadgroups * bins * sizeof(long), MTL::ResourceStorageModeShared);
+    MTL::Buffer* p_sumDiscountBP = device->newBuffer(num_threadgroups * bins * sizeof(uint32_t), MTL::ResourceStorageModeShared);
+    MTL::Buffer* p_counts = device->newBuffer(num_threadgroups * bins * sizeof(uint32_t), MTL::ResourceStorageModeShared);
+    // Zero initialize partials (defensive)
+    memset(p_sumQtyCents->contents(), 0, num_threadgroups * bins * sizeof(long));
+    memset(p_sumBaseCents->contents(), 0, num_threadgroups * bins * sizeof(long));
+    memset(p_sumDiscPriceCents->contents(), 0, num_threadgroups * bins * sizeof(long));
+    memset(p_sumChargeCents->contents(), 0, num_threadgroups * bins * sizeof(long));
+    memset(p_sumDiscountBP->contents(), 0, num_threadgroups * bins * sizeof(uint32_t));
+    memset(p_counts->contents(), 0, num_threadgroups * bins * sizeof(uint32_t));
+
+    // Stage 2 finals: size = bins
+    MTL::Buffer* f_sumQtyCents = device->newBuffer(bins * sizeof(long), MTL::ResourceStorageModeShared);
+    MTL::Buffer* f_sumBaseCents = device->newBuffer(bins * sizeof(long), MTL::ResourceStorageModeShared);
+    MTL::Buffer* f_sumDiscPriceCents = device->newBuffer(bins * sizeof(long), MTL::ResourceStorageModeShared);
+    MTL::Buffer* f_sumChargeCents = device->newBuffer(bins * sizeof(long), MTL::ResourceStorageModeShared);
+    MTL::Buffer* f_sumDiscountBP = device->newBuffer(bins * sizeof(uint32_t), MTL::ResourceStorageModeShared);
+    MTL::Buffer* f_counts = device->newBuffer(bins * sizeof(uint32_t), MTL::ResourceStorageModeShared);
+    memset(f_sumQtyCents->contents(), 0, bins * sizeof(long));
+    memset(f_sumBaseCents->contents(), 0, bins * sizeof(long));
+    memset(f_sumDiscPriceCents->contents(), 0, bins * sizeof(long));
+    memset(f_sumChargeCents->contents(), 0, bins * sizeof(long));
+    memset(f_sumDiscountBP->contents(), 0, bins * sizeof(uint32_t));
+    memset(f_counts->contents(), 0, bins * sizeof(uint32_t));
+
+    // No compaction needed for fixed bins
+
+    // Dispatch kernels
     MTL::CommandBuffer* commandBuffer = commandQueue->commandBuffer();
+    const int cutoffDate = 19980902; // DATE '1998-12-01' - INTERVAL '90' DAY
 
-    // Stage 1: Selection
-    MTL::ComputeCommandEncoder* selectionEncoder = commandBuffer->computeCommandEncoder();
-    int filterDate = 19980902; // Corresponds to DATE '1998-12-01' - INTERVAL '90' DAY
-    selectionEncoder->setComputePipelineState(selectionPipeline);
-    selectionEncoder->setBuffer(shipdateBuffer, 0, 0);
-    selectionEncoder->setBuffer(bitmapBuffer, 0, 1);
-    selectionEncoder->setBytes(&filterDate, sizeof(filterDate), 2);
-    selectionEncoder->dispatchThreads(MTL::Size::Make(data_size, 1, 1), MTL::Size::Make(1024, 1, 1));
-    selectionEncoder->endEncoding();
-    
-    // Stage 2: Local Aggregation
-    MTL::ComputeCommandEncoder* localAggEncoder = commandBuffer->computeCommandEncoder();
-    localAggEncoder->setComputePipelineState(localAggPipeline);
-    localAggEncoder->setBuffer(bitmapBuffer, 0, 0);
-    localAggEncoder->setBuffer(flagBuffer, 0, 1);
-    localAggEncoder->setBuffer(statusBuffer, 0, 2);
-    localAggEncoder->setBuffer(qtyBuffer, 0, 3);
-    localAggEncoder->setBuffer(priceBuffer, 0, 4);
-    localAggEncoder->setBuffer(discBuffer, 0, 5);
-    localAggEncoder->setBuffer(taxBuffer, 0, 6);
-    localAggEncoder->setBuffer(intermediateBuffer, 0, 7);
-    localAggEncoder->setBytes(&data_size, sizeof(data_size), 8);
-    localAggEncoder->dispatchThreadgroups(MTL::Size::Make(num_threadgroups, 1, 1), MTL::Size::Make(1024, 1, 1));
-    localAggEncoder->endEncoding();
+    auto gpuStart = std::chrono::high_resolution_clock::now();
+    // Stage 1: accumulate partials
+    {
+        MTL::ComputeCommandEncoder* enc = commandBuffer->computeCommandEncoder();
+        enc->setComputePipelineState(stage1PSO);
+        enc->setBuffer(shipdateBuffer, 0, 0);
+        enc->setBuffer(flagBuffer, 0, 1);
+        enc->setBuffer(statusBuffer, 0, 2);
+        enc->setBuffer(qtyBuffer, 0, 3);
+        enc->setBuffer(priceBuffer, 0, 4);
+        enc->setBuffer(discBuffer, 0, 5);
+        enc->setBuffer(taxBuffer, 0, 6);
+        enc->setBuffer(p_sumQtyCents, 0, 7);
+        enc->setBuffer(p_sumBaseCents, 0, 8);
+        enc->setBuffer(p_sumDiscPriceCents, 0, 9);
+        enc->setBuffer(p_sumChargeCents, 0, 10);
+        enc->setBuffer(p_sumDiscountBP, 0, 11);
+        enc->setBuffer(p_counts, 0, 12);
+    enc->setBytes(&data_size, sizeof(data_size), 13);
+    enc->setBytes(&cutoffDate, sizeof(cutoffDate), 14);
+    enc->setBytes(&num_threadgroups, sizeof(num_threadgroups), 15);
+        NS::UInteger tgSize = stage1PSO->maxTotalThreadsPerThreadgroup();
+        if (tgSize > 1024) tgSize = 1024; // matches shared arrays in kernel
+        enc->dispatchThreadgroups(MTL::Size::Make(num_threadgroups, 1, 1), MTL::Size::Make(tgSize, 1, 1));
+        enc->endEncoding();
+    }
 
-    // Stage 3: Merge
-    MTL::ComputeCommandEncoder* mergeEncoder = commandBuffer->computeCommandEncoder();
-    mergeEncoder->setComputePipelineState(mergePipeline);
-    mergeEncoder->setBuffer(intermediateBuffer, 0, 0);
-    mergeEncoder->setBuffer(finalHashTableBuffer, 0, 1);
-    mergeEncoder->setBytes(&intermediate_size, sizeof(intermediate_size), 2);
-    mergeEncoder->setBytes(&final_ht_size, sizeof(final_ht_size), 3);
-    mergeEncoder->dispatchThreads(MTL::Size::Make(intermediate_size, 1, 1), MTL::Size::Make(1024, 1, 1));
-    mergeEncoder->endEncoding();
+    // Stage 2: reduce partials to finals
+    {
+        MTL::ComputeCommandEncoder* enc = commandBuffer->computeCommandEncoder();
+        enc->setComputePipelineState(stage2PSO);
+        enc->setBuffer(p_sumQtyCents, 0, 0);
+        enc->setBuffer(p_sumBaseCents, 0, 1);
+        enc->setBuffer(p_sumDiscPriceCents, 0, 2);
+        enc->setBuffer(p_sumChargeCents, 0, 3);
+        enc->setBuffer(p_sumDiscountBP, 0, 4);
+        enc->setBuffer(p_counts, 0, 5);
+        enc->setBuffer(f_sumQtyCents, 0, 6);
+        enc->setBuffer(f_sumBaseCents, 0, 7);
+        enc->setBuffer(f_sumDiscPriceCents, 0, 8);
+        enc->setBuffer(f_sumChargeCents, 0, 9);
+        enc->setBuffer(f_sumDiscountBP, 0, 10);
+        enc->setBuffer(f_counts, 0, 11);
+        enc->setBytes(&num_threadgroups, sizeof(num_threadgroups), 12);
+        enc->dispatchThreads(MTL::Size::Make(1, 1, 1), MTL::Size::Make(1, 1, 1));
+        enc->endEncoding();
+    }
 
     commandBuffer->commit();
     commandBuffer->waitUntilCompleted();
-    double gpuExecutionTime = commandBuffer->GPUEndTime() - commandBuffer->GPUStartTime();
+    auto gpuEnd = std::chrono::high_resolution_clock::now();
+    double gpuMs = std::chrono::duration<double, std::milli>(gpuEnd - gpuStart).count();
 
-    // Print Results (same logic as before)
-    struct Q1Result { float sum_qty, sum_base_price, sum_disc_price, sum_charge, avg_qty, avg_price, avg_disc; uint count; };
-    Q1Aggregates_CPU* results = (Q1Aggregates_CPU*)finalHashTableBuffer->contents();
-    std::map<std::pair<char, char>, Q1Result> final_results;
-    for (int i = 0; i < final_ht_size; ++i) {
-        if (results[i].key != -1) {
-            char flag = (results[i].key >> 8) & 0xFF, status = results[i].key & 0xFF;
-            Q1Result res;
-            res.sum_qty = results[i].sum_qty; res.sum_base_price = results[i].sum_base_price;
-            res.sum_disc_price = results[i].sum_disc_price; res.sum_charge = results[i].sum_charge;
-            res.count = results[i].count;
-            res.avg_qty = res.sum_qty / res.count; res.avg_price = res.sum_base_price / res.count;
-            res.avg_disc = results[i].sum_discount / res.count;
-            final_results[{flag, status}] = res;
-        }
-    }
+    // Read back final results
+    long* sum_qty_c = (long*)f_sumQtyCents->contents();
+    long* sum_base_c = (long*)f_sumBaseCents->contents();
+    long* sum_disc_c = (long*)f_sumDiscPriceCents->contents();
+    long* sum_charge_c = (long*)f_sumChargeCents->contents();
+    uint32_t* sum_discount_bp = (uint32_t*)f_sumDiscountBP->contents();
+    uint32_t* counts = (uint32_t*)f_counts->contents();
+
+    struct Q1Result { double sum_qty, sum_base_price, sum_disc_price, sum_charge, avg_qty, avg_price, avg_disc; uint count; };
+    std::map<std::pair<char,char>, Q1Result> final_results;
+    auto emit_bin = [&](int rfIdx, int lsIdx, int bin){
+        if (counts[bin] == 0) return;
+        char rf = (rfIdx==0?'A':rfIdx==1?'N':'R');
+        char ls = (lsIdx==0?'F':'O');
+        Q1Result r;
+        r.sum_qty = (double)sum_qty_c[bin] / 100.0;
+        r.sum_base_price = (double)sum_base_c[bin] / 100.0;
+        r.sum_disc_price = (double)sum_disc_c[bin] / 100.0;
+        r.sum_charge = (double)sum_charge_c[bin] / 100.0;
+        r.count = counts[bin];
+        r.avg_qty = r.sum_qty / (double)r.count;
+        r.avg_price = r.sum_base_price / (double)r.count;
+        r.avg_disc = ((double)sum_discount_bp[bin] / 100.0) / (double)r.count; // average discount as fraction
+        final_results[{rf, ls}] = r;
+    };
+    emit_bin(0,0,0); // A/F
+    emit_bin(0,1,1); // A/O
+    emit_bin(1,0,2); // N/F
+    emit_bin(1,1,3); // N/O
+    emit_bin(2,0,4); // R/F
+    emit_bin(2,1,5); // R/O
+
     printf("\n+----------+----------+------------+----------------+----------------+----------------+------------+------------+------------+----------+\n");
     printf("| l_return | l_linest |    sum_qty | sum_base_price | sum_disc_price |     sum_charge |    avg_qty |  avg_price |   avg_disc | count    |\n");
     printf("+----------+----------+------------+----------------+----------------+----------------+------------+------------+------------+----------+\n");
-    for(auto const& [key, val] : final_results) {
+    for (auto const& [key, val] : final_results) {
         printf("| %8c | %8c | %10.2f | %14.2f | %14.2f | %14.2f | %10.2f | %10.2f | %10.2f | %8u |\n",
                key.first, key.second, val.sum_qty, val.sum_base_price, val.sum_disc_price, val.sum_charge,
                val.avg_qty, val.avg_price, val.avg_disc, val.count);
     }
     printf("+----------+----------+------------+----------------+----------------+----------------+------------+------------+------------+----------+\n");
-    std::cout << "Total TPC-H Q1 GPU time: " << gpuExecutionTime * 1000.0 << " ms" << std::endl;
-    
+    std::cout << "Total Q1 GPU time: " << gpuMs << " ms" << std::endl;
+
     // Cleanup
-    selectionFunction->release();
-    selectionPipeline->release();
-    localAggFunction->release();
-    localAggPipeline->release();
-    mergeFunction->release();
-    mergePipeline->release();
-    shipdateBuffer->release();
-    bitmapBuffer->release();
-    flagBuffer->release();
-    statusBuffer->release();
-    qtyBuffer->release();
-    priceBuffer->release();
-    discBuffer->release();
-    taxBuffer->release();
-    intermediateBuffer->release();
-    finalHashTableBuffer->release();
-    selectionFunctionName->release();
-    localAggFunctionName->release();
-    mergeFunctionName->release();
+    stage1Fn->release(); stage1PSO->release(); stage2Fn->release(); stage2PSO->release();
+    shipdateBuffer->release(); flagBuffer->release(); statusBuffer->release();
+    qtyBuffer->release(); priceBuffer->release(); discBuffer->release(); taxBuffer->release();
+    p_sumQtyCents->release(); p_sumBaseCents->release(); p_sumDiscPriceCents->release(); p_sumChargeCents->release(); p_sumDiscountBP->release(); p_counts->release();
+    f_sumQtyCents->release(); f_sumBaseCents->release(); f_sumDiscPriceCents->release(); f_sumChargeCents->release(); f_sumDiscountBP->release(); f_counts->release();
 }
 
 
