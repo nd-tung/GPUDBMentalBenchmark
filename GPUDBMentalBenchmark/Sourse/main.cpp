@@ -1035,12 +1035,13 @@ void runQ9Benchmark(MTL::Device* pDevice, MTL::CommandQueue* pCommandQueue, MTL:
     MTL::Buffer* pSuppNationKeyBuffer = pDevice->newBuffer(s_nationkey.data(), supplier_size * sizeof(int), MTL::ResourceStorageModeShared);
     MTL::Buffer* pSupplierHTBuffer = pDevice->newBuffer(cpu_supplier_ht.data(), supplier_ht_size * sizeof(int) * 2, MTL::ResourceStorageModeShared);
     
-    const uint partsupp_ht_size = partsupp_size * 2;
-    std::vector<int> cpu_partsupp_ht(partsupp_ht_size * 2, -1);
+    const uint partsupp_ht_size = partsupp_size * 4; // larger table to reduce probe lengths
+    // PartSuppEntry has 4 ints (partkey, suppkey, idx, pad); initialize all to -1 to mark empty
+    std::vector<int> cpu_partsupp_ht(partsupp_ht_size * 4, -1);
     MTL::Buffer* pPsPartKeyBuffer = pDevice->newBuffer(ps_partkey.data(), partsupp_size * sizeof(int), MTL::ResourceStorageModeShared);
     MTL::Buffer* pPsSuppKeyBuffer = pDevice->newBuffer(ps_suppkey.data(), partsupp_size * sizeof(int), MTL::ResourceStorageModeShared);
     MTL::Buffer* pPsSupplyCostBuffer = pDevice->newBuffer(ps_supplycost.data(), partsupp_size * sizeof(float), MTL::ResourceStorageModeShared);
-    MTL::Buffer* pPartSuppHTBuffer = pDevice->newBuffer(cpu_partsupp_ht.data(), partsupp_ht_size * sizeof(int) * 2, MTL::ResourceStorageModeShared);
+    MTL::Buffer* pPartSuppHTBuffer = pDevice->newBuffer(cpu_partsupp_ht.data(), partsupp_ht_size * sizeof(int) * 4, MTL::ResourceStorageModeShared);
     
     const uint orders_ht_size = orders_size * 2;
     std::vector<int> cpu_orders_ht(orders_ht_size * 2, -1);
@@ -1057,11 +1058,15 @@ void runQ9Benchmark(MTL::Device* pDevice, MTL::CommandQueue* pCommandQueue, MTL:
 
     const uint num_threadgroups = 2048, local_ht_size = 256, intermediate_size = num_threadgroups * local_ht_size;
     MTL::Buffer* pIntermediateBuffer = pDevice->newBuffer(intermediate_size * sizeof(Q9Aggregates_CPU), MTL::ResourceStorageModeShared);
+    // Ensure intermediate buffer is zero-initialized so merge stage can early-out on empty slots
+    std::memset(pIntermediateBuffer->contents(), 0, intermediate_size * sizeof(Q9Aggregates_CPU));
     const uint final_ht_size = 25 * 10; // 25 nations * ~10 years
     std::vector<uint> cpu_final_ht(final_ht_size * (sizeof(Q9Aggregates_CPU)/sizeof(uint)), 0);
     MTL::Buffer* pFinalHTBuffer = pDevice->newBuffer(cpu_final_ht.data(), final_ht_size * sizeof(Q9Aggregates_CPU), MTL::ResourceStorageModeShared);
 
     // 4. Dispatch the entire 6-stage pipeline
+    // First command buffer: build all hash tables (stages 1-4)
+    auto q9_e2e_start = std::chrono::high_resolution_clock::now();
     MTL::CommandBuffer* pCommandBuffer = pCommandQueue->commandBuffer();
     
     MTL::ComputeCommandEncoder* pEnc1 = pCommandBuffer->computeCommandEncoder();
@@ -1096,7 +1101,14 @@ void runQ9Benchmark(MTL::Device* pDevice, MTL::CommandQueue* pCommandQueue, MTL:
     pEnc4->dispatchThreads(MTL::Size(orders_size, 1, 1), MTL::Size(1024, 1, 1));
     pEnc4->endEncoding();
     
-    MTL::ComputeCommandEncoder* pEnc5 = pCommandBuffer->computeCommandEncoder();
+    // Submit the first four stages
+    pCommandBuffer->commit();
+    pCommandBuffer->waitUntilCompleted();
+
+    // Second command buffer: probe+aggregate (stage 5) and merge (stage 6)
+    MTL::CommandBuffer* pCommandBuffer2 = pCommandQueue->commandBuffer();
+
+    MTL::ComputeCommandEncoder* pEnc5 = pCommandBuffer2->computeCommandEncoder();
     pEnc5->setComputePipelineState(pProbeAggPipe);
     pEnc5->setBuffer(pLineSuppKeyBuffer, 0, 0); pEnc5->setBuffer(pLinePartKeyBuffer, 0, 1);
     pEnc5->setBuffer(pLineOrdKeyBuffer, 0, 2); pEnc5->setBuffer(pLinePriceBuffer, 0, 3);
@@ -1109,18 +1121,22 @@ void runQ9Benchmark(MTL::Device* pDevice, MTL::CommandQueue* pCommandQueue, MTL:
     pEnc5->setBytes(&orders_ht_size, sizeof(orders_ht_size), 16);
     pEnc5->dispatchThreadgroups(MTL::Size(num_threadgroups, 1, 1), MTL::Size(1024, 1, 1));
     pEnc5->endEncoding();
-    
-    MTL::ComputeCommandEncoder* pEnc6 = pCommandBuffer->computeCommandEncoder();
+
+    MTL::ComputeCommandEncoder* pEnc6 = pCommandBuffer2->computeCommandEncoder();
     pEnc6->setComputePipelineState(pMergePipe);
     pEnc6->setBuffer(pIntermediateBuffer, 0, 0); pEnc6->setBuffer(pFinalHTBuffer, 0, 1);
     pEnc6->setBytes(&intermediate_size, sizeof(intermediate_size), 2); pEnc6->setBytes(&final_ht_size, sizeof(final_ht_size), 3);
     pEnc6->dispatchThreads(MTL::Size(intermediate_size, 1, 1), MTL::Size(1024, 1, 1));
     pEnc6->endEncoding();
 
-    // 5. Execute and time
-    pCommandBuffer->commit();
-    pCommandBuffer->waitUntilCompleted();
-    double gpuExecutionTime = pCommandBuffer->GPUEndTime() - pCommandBuffer->GPUStartTime();
+    // Execute and time only the heavy stages 5+6
+    auto q9_start = std::chrono::high_resolution_clock::now();
+    pCommandBuffer2->commit();
+    pCommandBuffer2->waitUntilCompleted();
+    auto q9_end = std::chrono::high_resolution_clock::now();
+    double probeMergeTime = std::chrono::duration<double>(q9_end - q9_start).count();
+    auto q9_e2e_end = std::chrono::high_resolution_clock::now();
+    double q9_e2e_time = std::chrono::duration<double>(q9_e2e_end - q9_e2e_start).count();
 
     // 6. Process and print final results
     Q9Aggregates_CPU* results = (Q9Aggregates_CPU*)pFinalHTBuffer->contents();
@@ -1137,17 +1153,32 @@ void runQ9Benchmark(MTL::Device* pDevice, MTL::CommandQueue* pCommandQueue, MTL:
         return a.year > b.year;
     });
 
-    printf("\nTPC-H Query 9 Results (Top 15):\n");
+    // Print all results for verification
+    printf("\nTPC-H Query 9 Results (All):\n");
     printf("+------------+------+---------------+\n");
     printf("| Nation     | Year |        Profit |\n");
     printf("+------------+------+---------------+\n");
-    for (int i = 0; i < 15 && i < final_results.size(); ++i) {
+    for (size_t i = 0; i < final_results.size(); ++i) {
         printf("| %-10s | %4d | $%13.2f |\n",
                nation_names[final_results[i].nationkey].c_str(), final_results[i].year, final_results[i].profit);
     }
     printf("+------------+------+---------------+\n");
     printf("Total results found: %lu\n", final_results.size());
-    printf("Total TPC-H Q9 GPU time: %f ms\n", gpuExecutionTime * 1000.0);
+    
+    // Also write results to CSV for automated comparison
+    {
+        std::ofstream q9csv("../benchmark_results/q9_gpu_sf1.csv", std::ios::trunc);
+        if (q9csv.is_open()) {
+            q9csv << "nation,o_year,sum_profit\n";
+            for (const auto& r : final_results) {
+                q9csv << nation_names[r.nationkey] << "," << r.year << "," << std::fixed << std::setprecision(2) << r.profit << "\n";
+            }
+            q9csv.close();
+        }
+    }
+    
+    printf("Q9 probe+merge wall-clock: %0.2f ms\n", probeMergeTime * 1000.0);
+    printf("Total TPC-H Q9 GPU time: %0.2f ms\n", q9_e2e_time * 1000.0);
     
     // Release all functions and pipelines
     pPartBuildFn->release();

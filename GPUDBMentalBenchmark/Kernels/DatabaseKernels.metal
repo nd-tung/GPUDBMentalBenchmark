@@ -1509,26 +1509,49 @@ kernel void q9_build_supplier_ht_kernel(
 }
 
 // KERNEL 3: Build HT on PARTSUPP, storing supplycost index as value
+struct PartSuppEntry {
+    atomic_int partkey;
+    atomic_int suppkey;
+    atomic_int idx; // row index into ps_supplycost array
+    int _pad; // ensure 16-byte stride for predictable layout
+};
+
 kernel void q9_build_partsupp_ht_kernel(
     const device int* ps_partkey,
     const device int* ps_suppkey,
-    device HashTableEntry* partsupp_ht,
+    device PartSuppEntry* partsupp_ht,
     constant uint& partsupp_size,
     constant uint& partsupp_ht_size,
     uint index [[thread_position_in_grid]])
 {
     if (index >= partsupp_size) return;
-    // Compound key (simplification, prone to collisions)
-    int key = (ps_partkey[index] * 31 + ps_suppkey[index]);
-    int value = (int)index; // Store index to original ps_supplycost array
-    uint hash_index = (uint)key % partsupp_ht_size;
+    int pk = ps_partkey[index];
+    int sk = ps_suppkey[index];
+    int val = (int)index;
+    // Combined hash of (partkey, suppkey) to reduce probe lengths
+    uint mix = (uint)pk * 0x9E3779B1u ^ (uint)sk * 0x85EBCA77u;
+    uint hash_index = mix % partsupp_ht_size;
     for (uint i = 0; i < partsupp_ht_size; ++i) {
         uint probe_index = (hash_index + i) % partsupp_ht_size;
-        int expected = -1;
-        if (atomic_compare_exchange_weak_explicit(&partsupp_ht[probe_index].key, &expected, key, memory_order_relaxed, memory_order_relaxed)) {
-            atomic_store_explicit(&partsupp_ht[probe_index].value, value, memory_order_relaxed);
+        // Try to claim empty slot by setting partkey from -1 to pk
+        int expected_pk = -1;
+        if (atomic_compare_exchange_weak_explicit(&partsupp_ht[probe_index].partkey, &expected_pk, pk, memory_order_relaxed, memory_order_relaxed)) {
+            // Successfully claimed slot; write suppkey and idx
+            atomic_store_explicit(&partsupp_ht[probe_index].suppkey, sk, memory_order_relaxed);
+            atomic_store_explicit(&partsupp_ht[probe_index].idx, val, memory_order_relaxed);
             return;
         }
+        // If slot has our (pk,sk), update idx and return (data is unique so this just sets once)
+        int cur_pk = atomic_load_explicit(&partsupp_ht[probe_index].partkey, memory_order_relaxed);
+        if (cur_pk == -1) { return; } // empty slot -> not found
+        if (cur_pk == pk) {
+            int cur_sk = atomic_load_explicit(&partsupp_ht[probe_index].suppkey, memory_order_relaxed);
+            if (cur_sk == sk) {
+                atomic_store_explicit(&partsupp_ht[probe_index].idx, val, memory_order_relaxed);
+                return;
+            }
+        }
+        // else continue probing
     }
 }
 
@@ -1565,7 +1588,7 @@ kernel void q9_probe_and_local_agg_kernel(
     const device float* ps_supplycost,
     // Pre-built hash tables
     const device HashTableEntry* part_ht, const device HashTableEntry* supplier_ht,
-    const device HashTableEntry* partsupp_ht, const device HashTableEntry* orders_ht,
+    const device PartSuppEntry* partsupp_ht, const device HashTableEntry* orders_ht,
     // Output buffer
     device Q9Aggregates_Local* intermediate_results,
     // Parameters
@@ -1619,18 +1642,20 @@ kernel void q9_probe_and_local_agg_kernel(
         }
         if (nationkey == -1) continue;
 
-        // 3. Probe partsupp_ht to get supply cost index
+        // 3. Probe partsupp_ht to get supply cost index (use combined hash of (partkey,suppkey))
         int ps_idx = -1;
-        int compound_key = (partkey * 31 + suppkey);
-        uint ps_hash = (uint)compound_key % partsupp_ht_size;
+        uint ps_hash = ((uint)partkey * 0x9E3779B1u ^ (uint)suppkey * 0x85EBCA77u) % partsupp_ht_size;
         for (uint j = 0; j < partsupp_ht_size; ++j) {
             uint probe_idx = (ps_hash + j) % partsupp_ht_size;
-            int table_key = atomic_load_explicit(&partsupp_ht[probe_idx].key, memory_order_relaxed);
-            if (table_key == compound_key) {
-                ps_idx = atomic_load_explicit(&partsupp_ht[probe_idx].value, memory_order_relaxed);
-                break;
+            int pk2 = atomic_load_explicit(&partsupp_ht[probe_idx].partkey, memory_order_relaxed);
+            if (pk2 == -1) break; // empty slot -> not found
+            if (pk2 == partkey) {
+                int sk2 = atomic_load_explicit(&partsupp_ht[probe_idx].suppkey, memory_order_relaxed);
+                if (sk2 == suppkey) {
+                    ps_idx = atomic_load_explicit(&partsupp_ht[probe_idx].idx, memory_order_relaxed);
+                    break;
+                }
             }
-            if (table_key == -1) break;
         }
         if (ps_idx == -1) continue;
 

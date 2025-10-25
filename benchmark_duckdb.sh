@@ -255,6 +255,49 @@ EOF
     
     end_time=$(python3 -c "import time; print(time.time())")
     supplier_load_time=$(python3 -c "print(round(($end_time - $start_time) * 1000, 2))")
+
+    echo "Loading partsupp table..."
+    start_time=$(python3 -c "import time; print(time.time())")
+    
+    duckdb "$DB_FILE" << EOF
+DROP TABLE IF EXISTS partsupp;
+CREATE TABLE partsupp AS 
+SELECT * FROM read_csv_auto('$data_path/partsupp.tbl', 
+    delim='|', 
+    header=false,
+    columns = {
+        'ps_partkey': 'INTEGER',
+        'ps_suppkey': 'INTEGER',
+        'ps_availqty': 'INTEGER',
+        'ps_supplycost': 'DECIMAL(10,2)',
+        'ps_comment': 'VARCHAR(199)'
+    }
+);
+EOF
+    
+    end_time=$(python3 -c "import time; print(time.time())")
+    partsupp_load_time=$(python3 -c "print(round(($end_time - $start_time) * 1000, 2))")
+
+    echo "Loading nation table..."
+    start_time=$(python3 -c "import time; print(time.time())")
+    
+    duckdb "$DB_FILE" << EOF
+DROP TABLE IF EXISTS nation;
+CREATE TABLE nation AS 
+SELECT * FROM read_csv_auto('$data_path/nation.tbl', 
+    delim='|', 
+    header=false,
+    columns = {
+        'n_nationkey': 'INTEGER',
+        'n_name': 'VARCHAR(25)',
+        'n_regionkey': 'INTEGER',
+        'n_comment': 'VARCHAR(152)'
+    }
+);
+EOF
+    
+    end_time=$(python3 -c "import time; print(time.time())")
+    nation_load_time=$(python3 -c "print(round(($end_time - $start_time) * 1000, 2))")
     
     # Get statistics
     lineitem_count=$(duckdb "$DB_FILE" -c "SELECT COUNT(*) FROM lineitem" 2>/dev/null | tail -1)
@@ -269,6 +312,8 @@ EOF
     echo "  Customer: $customer_count rows (loaded in ${customer_load_time}ms)"
     echo "  Part: $part_count rows (loaded in ${part_load_time}ms)"
     echo "  Supplier: $supplier_count rows (loaded in ${supplier_load_time}ms)"
+    echo "  Partsupp: $(duckdb "$DB_FILE" -c "SELECT COUNT(*) FROM partsupp" 2>/dev/null | tail -1) rows (loaded in ${partsupp_load_time}ms)"
+    echo "  Nation: $(duckdb "$DB_FILE" -c "SELECT COUNT(*) FROM nation" 2>/dev/null | tail -1) rows (loaded in ${nation_load_time}ms)"
     echo
 }
 
@@ -364,18 +409,24 @@ run_benchmarks() {
           AND l_quantity < 24;" \
         "$scale_factor"
     
-    # 7. TPC-H Query 9 Benchmark (Product Type Profit Measure Query)
-    print_header "TPC-H Query 9 Benchmark ($scale_factor) - In Memory"
+    # 7. TPC-H Query 9 Benchmark (Standard) - Product Type Profit Measure
+    print_header "TPC-H Query 9 Benchmark ($scale_factor) - Standard"
     
-    execute_sql "TPC-H Query 9" \
-        "SELECT
+    execute_sql "TPC-H Query 9 (standard)" \
+        "SELECT 
+            n.n_name AS nation,
             EXTRACT(YEAR FROM o.o_orderdate) AS o_year,
-            SUM(l.l_extendedprice * (1 - l.l_discount)) AS sum_profit
-        FROM lineitem l
-        JOIN orders o ON l.l_orderkey = o.o_orderkey
-        WHERE l.l_partkey IN (SELECT DISTINCT l_partkey FROM lineitem LIMIT 100)
-        GROUP BY EXTRACT(YEAR FROM o.o_orderdate)
-        ORDER BY o_year;" \
+            SUM(l.l_extendedprice * (1 - l.l_discount) - ps.ps_supplycost * l.l_quantity) AS sum_profit
+        FROM part p, supplier s, lineitem l, partsupp ps, orders o, nation n
+        WHERE s.s_suppkey = l.l_suppkey
+          AND ps.ps_suppkey = l.l_suppkey
+          AND ps.ps_partkey = l.l_partkey
+          AND p.p_partkey = l.l_partkey
+          AND o.o_orderkey = l.l_orderkey
+          AND s.s_nationkey = n.n_nationkey
+          AND p.p_name LIKE '%green%'
+        GROUP BY nation, o_year
+        ORDER BY nation, o_year DESC;" \
         "$scale_factor"
     
     # 8. TPC-H Query 13 Benchmark (Customer Distribution Query)
