@@ -9,7 +9,7 @@ kernel void selection_kernel(const device int  *inData,        // Input data col
                            uint index [[thread_position_in_grid]]) {
 
     // Each thread performs one comparison
-    if (inData[index] < filterValue) {
+    if (inData[index] <= filterValue) {
         result[index] = 1;
     } else {
         result[index] = 0;
@@ -197,6 +197,49 @@ struct Q1Aggregates_Local {
     uint  count;
 };
 
+// HYBRID MODE: Append-only emission of per-row contributions for Q1.
+// This mirrors Q3's robust approach to avoid contention and nondeterminism.
+kernel void q1_emit_selected_kernel(
+    const device uint* selection_bitmap,
+    const device char* l_returnflag,
+    const device char* l_linestatus,
+    const device float* l_quantity,
+    const device float* l_extendedprice,
+    const device float* l_discount,
+    const device float* l_tax,
+    device Q1Aggregates_Local* out_results,   // Append-only buffer of per-row contributions
+    device atomic_uint* out_count,            // Global atomic counter
+    constant uint& data_size,
+    constant uint& out_capacity,
+    uint group_id [[threadgroup_position_in_grid]],
+    uint thread_id_in_group [[thread_index_in_threadgroup]],
+    uint threads_per_group [[threads_per_threadgroup]])
+{
+    uint grid_size = threads_per_group * 2048;
+    for (uint i = (group_id * threads_per_group) + thread_id_in_group; i < data_size; i += grid_size) {
+        if (selection_bitmap[i] == 1) {
+            // Compute packed group key (returnflag, linestatus)
+            int key = ((int)l_returnflag[i] << 8) | (int)l_linestatus[i];
+            // Compute per-row contributions
+            Q1Aggregates_Local r;
+            r.key = key;
+            r.sum_qty = l_quantity[i];
+            r.sum_base_price = l_extendedprice[i];
+            float disc_factor = 1.0f - l_discount[i];
+            r.sum_disc_price = l_extendedprice[i] * disc_factor;
+            r.sum_charge = r.sum_disc_price * (1.0f + l_tax[i]);
+            r.sum_discount = l_discount[i];
+            r.count = 1u;
+
+            // Append to global buffer if capacity allows
+            uint idx = atomic_fetch_add_explicit(out_count, 1u, memory_order_relaxed);
+            if (idx < out_capacity) {
+                out_results[idx] = r;
+            }
+        }
+    }
+}
+
 // STAGE 1: Each threadgroup creates its own private hash table in threadgroup memory
 // and performs a local aggregation.
 kernel void q1_local_aggregation_kernel(
@@ -217,11 +260,15 @@ kernel void q1_local_aggregation_kernel(
     const int local_ht_size = 16;
     thread Q1Aggregates_Local local_ht[local_ht_size];
 
-    // Initialize the private hash table.
+    // Initialize the private hash table. Explicitly zero all fields to avoid garbage.
     for (int i = thread_id_in_group; i < local_ht_size; i += threads_per_group) {
         local_ht[i].key = -1;
-        local_ht[i].count = 0;
-        // other fields are implicitly zeroed by their accumulation logic
+        local_ht[i].sum_qty = 0.0f;
+        local_ht[i].sum_base_price = 0.0f;
+        local_ht[i].sum_disc_price = 0.0f;
+        local_ht[i].sum_charge = 0.0f;
+        local_ht[i].sum_discount = 0.0f;
+        local_ht[i].count = 0u;
     }
     threadgroup_barrier(mem_flags::mem_threadgroup);
 

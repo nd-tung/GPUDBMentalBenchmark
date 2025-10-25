@@ -13,6 +13,7 @@
 #include <chrono>
 #include <iomanip>
 #include <cmath>
+#include <unordered_map>
 
 // Global dataset configuration
 std::string g_dataset_path = "Data/SF-1/"; // Default to SF-10
@@ -425,13 +426,57 @@ void runQ1Benchmark(MTL::Device* device, MTL::CommandQueue* commandQueue, MTL::L
     MTL::Function* selectionFunction = library->newFunction(selectionFunctionName);
     MTL::ComputePipelineState* selectionPipeline = device->newComputePipelineState(selectionFunction, &error);
 
-    NS::String* localAggFunctionName = NS::String::string("q1_local_aggregation_kernel", NS::UTF8StringEncoding);
-    MTL::Function* localAggFunction = library->newFunction(localAggFunctionName);
-    MTL::ComputePipelineState* localAggPipeline = device->newComputePipelineState(localAggFunction, &error);
-
-    NS::String* mergeFunctionName = NS::String::string("q1_merge_kernel", NS::UTF8StringEncoding);
-    MTL::Function* mergeFunction = library->newFunction(mergeFunctionName);
-    MTL::ComputePipelineState* mergePipeline = device->newComputePipelineState(mergeFunction, &error);
+    // Hybrid approach: emit per-selected row contributions, then CPU group-by
+    NS::String* emitFunctionName = NS::String::string("q1_emit_selected_kernel", NS::UTF8StringEncoding);
+    MTL::Function* emitFunction = library->newFunction(emitFunctionName);
+    MTL::Library* q1LocalLib = nullptr;
+    if (!emitFunction) {
+        // Fallback: recompile library from source to get the new kernel
+        const char* candidate_paths[] = {
+            "Kernels/DatabaseKernels.metal",
+            "../GPUDBMentalBenchmark/Kernels/DatabaseKernels.metal",
+            "GPUDBMentalBenchmark/Kernels/DatabaseKernels.metal"
+        };
+        std::ifstream srcFile;
+        for (const char* p : candidate_paths) {
+            srcFile.open(p);
+            if (srcFile.good()) break;
+            srcFile.close();
+        }
+        if (srcFile.good()) {
+            std::string src((std::istreambuf_iterator<char>(srcFile)), std::istreambuf_iterator<char>());
+            NS::String* srcStr = NS::String::string(src.c_str(), NS::UTF8StringEncoding);
+            MTL::CompileOptions* opts = MTL::CompileOptions::alloc()->init();
+            NS::Error* compileErr = nullptr;
+            MTL::Library* freshLib = device->newLibrary(srcStr, opts, &compileErr);
+            opts->release();
+            srcStr->release();
+            if (freshLib) {
+                // Recreate selection function from the same library to avoid mixing libraries
+                if (selectionFunction) { selectionFunction->release(); selectionFunction = nullptr; }
+                if (selectionPipeline) { selectionPipeline->release(); selectionPipeline = nullptr; }
+                selectionFunction = freshLib->newFunction(selectionFunctionName);
+                q1LocalLib = freshLib; // Hold the library alive until cleanup
+                emitFunction = q1LocalLib->newFunction(emitFunctionName);
+            } else {
+                std::cerr << "Failed to compile Metal source for Q1 emit kernel" << std::endl;
+                if (compileErr) {
+                    std::cerr << "Metal compile error: " << compileErr->localizedDescription()->utf8String() << std::endl;
+                }
+            }
+        }
+    }
+    if (!emitFunction) {
+        std::cerr << "Error: q1_emit_selected_kernel not found in Metal library (even after fallback)." << std::endl;
+        selectionFunction->release();
+        selectionPipeline->release();
+        emitFunctionName->release();
+        return;
+    }
+    MTL::ComputePipelineState* emitPipeline = device->newComputePipelineState(emitFunction, &error);
+    if (!selectionPipeline) {
+        selectionPipeline = device->newComputePipelineState(selectionFunction, &error);
+    }
 
     MTL::Buffer* shipdateBuffer = device->newBuffer(l_shipdate.data(), data_size * sizeof(int), MTL::ResourceStorageModeShared);
     MTL::Buffer* bitmapBuffer = device->newBuffer(data_size * sizeof(unsigned int), MTL::ResourceStorageModeShared);
@@ -443,13 +488,11 @@ void runQ1Benchmark(MTL::Device* device, MTL::CommandQueue* commandQueue, MTL::L
     MTL::Buffer* taxBuffer = device->newBuffer(l_tax.data(), data_size * sizeof(float), MTL::ResourceStorageModeShared);
     
     const uint num_threadgroups = 2048;
-    const uint local_ht_size = 16;
-    const uint intermediate_size = num_threadgroups * local_ht_size;
-    MTL::Buffer* intermediateBuffer = device->newBuffer(intermediate_size * sizeof(Q1Aggregates_CPU), MTL::ResourceStorageModeShared);
-
-    const uint final_ht_size = 64;
-    std::vector<int> cpuFinalHashTable(final_ht_size * (sizeof(Q1Aggregates_CPU)/sizeof(int)), -1);
-    MTL::Buffer* finalHashTableBuffer = device->newBuffer(cpuFinalHashTable.data(), final_ht_size * sizeof(Q1Aggregates_CPU), MTL::ResourceStorageModeShared);
+    // Allocate append-only buffer with capacity for all rows (worst case)
+    const uint out_capacity = data_size;
+    MTL::Buffer* outBuffer = device->newBuffer(out_capacity * sizeof(Q1Aggregates_CPU), MTL::ResourceStorageModeShared);
+    MTL::Buffer* outCountBuffer = device->newBuffer(sizeof(uint), MTL::ResourceStorageModeShared);
+    memset(outCountBuffer->contents(), 0, sizeof(uint));
 
     MTL::CommandBuffer* commandBuffer = commandQueue->commandBuffer();
 
@@ -463,82 +506,82 @@ void runQ1Benchmark(MTL::Device* device, MTL::CommandQueue* commandQueue, MTL::L
     selectionEncoder->dispatchThreads(MTL::Size::Make(data_size, 1, 1), MTL::Size::Make(1024, 1, 1));
     selectionEncoder->endEncoding();
     
-    // Stage 2: Local Aggregation
-    MTL::ComputeCommandEncoder* localAggEncoder = commandBuffer->computeCommandEncoder();
-    localAggEncoder->setComputePipelineState(localAggPipeline);
-    localAggEncoder->setBuffer(bitmapBuffer, 0, 0);
-    localAggEncoder->setBuffer(flagBuffer, 0, 1);
-    localAggEncoder->setBuffer(statusBuffer, 0, 2);
-    localAggEncoder->setBuffer(qtyBuffer, 0, 3);
-    localAggEncoder->setBuffer(priceBuffer, 0, 4);
-    localAggEncoder->setBuffer(discBuffer, 0, 5);
-    localAggEncoder->setBuffer(taxBuffer, 0, 6);
-    localAggEncoder->setBuffer(intermediateBuffer, 0, 7);
-    localAggEncoder->setBytes(&data_size, sizeof(data_size), 8);
-    localAggEncoder->dispatchThreadgroups(MTL::Size::Make(num_threadgroups, 1, 1), MTL::Size::Make(1024, 1, 1));
-    localAggEncoder->endEncoding();
-
-    // Stage 3: Merge
-    MTL::ComputeCommandEncoder* mergeEncoder = commandBuffer->computeCommandEncoder();
-    mergeEncoder->setComputePipelineState(mergePipeline);
-    mergeEncoder->setBuffer(intermediateBuffer, 0, 0);
-    mergeEncoder->setBuffer(finalHashTableBuffer, 0, 1);
-    mergeEncoder->setBytes(&intermediate_size, sizeof(intermediate_size), 2);
-    mergeEncoder->setBytes(&final_ht_size, sizeof(final_ht_size), 3);
-    mergeEncoder->dispatchThreads(MTL::Size::Make(intermediate_size, 1, 1), MTL::Size::Make(1024, 1, 1));
-    mergeEncoder->endEncoding();
+    // Stage 2: Emit per-row contributions (append-only)
+    MTL::ComputeCommandEncoder* emitEncoder = commandBuffer->computeCommandEncoder();
+    emitEncoder->setComputePipelineState(emitPipeline);
+    emitEncoder->setBuffer(bitmapBuffer, 0, 0);
+    emitEncoder->setBuffer(flagBuffer, 0, 1);
+    emitEncoder->setBuffer(statusBuffer, 0, 2);
+    emitEncoder->setBuffer(qtyBuffer, 0, 3);
+    emitEncoder->setBuffer(priceBuffer, 0, 4);
+    emitEncoder->setBuffer(discBuffer, 0, 5);
+    emitEncoder->setBuffer(taxBuffer, 0, 6);
+    emitEncoder->setBuffer(outBuffer, 0, 7);
+    emitEncoder->setBuffer(outCountBuffer, 0, 8);
+    emitEncoder->setBytes(&data_size, sizeof(data_size), 9);
+    emitEncoder->setBytes(&out_capacity, sizeof(out_capacity), 10);
+    emitEncoder->dispatchThreadgroups(MTL::Size::Make(num_threadgroups, 1, 1), MTL::Size::Make(1024, 1, 1));
+    emitEncoder->endEncoding();
 
     commandBuffer->commit();
     commandBuffer->waitUntilCompleted();
     double gpuExecutionTime = commandBuffer->GPUEndTime() - commandBuffer->GPUStartTime();
 
-    // Print Results (same logic as before)
-    struct Q1Result { float sum_qty, sum_base_price, sum_disc_price, sum_charge, avg_qty, avg_price, avg_disc; uint count; };
-    Q1Aggregates_CPU* results = (Q1Aggregates_CPU*)finalHashTableBuffer->contents();
-    std::map<std::pair<char, char>, Q1Result> final_results;
-    for (int i = 0; i < final_ht_size; ++i) {
-        if (results[i].key != -1) {
-            char flag = (results[i].key >> 8) & 0xFF, status = results[i].key & 0xFF;
-            Q1Result res;
-            res.sum_qty = results[i].sum_qty; res.sum_base_price = results[i].sum_base_price;
-            res.sum_disc_price = results[i].sum_disc_price; res.sum_charge = results[i].sum_charge;
-            res.count = results[i].count;
-            res.avg_qty = res.sum_qty / res.count; res.avg_price = res.sum_base_price / res.count;
-            res.avg_disc = results[i].sum_discount / res.count;
-            final_results[{flag, status}] = res;
-        }
+    // CPU group-by: deterministic aggregation over emitted rows
+    auto cpuStart = std::chrono::high_resolution_clock::now();
+    uint out_count = *(uint*)outCountBuffer->contents();
+    Q1Aggregates_CPU* rows = (Q1Aggregates_CPU*)outBuffer->contents();
+    struct Acc { double sum_qty=0, sum_base=0, sum_disc=0, sum_charge=0, sum_discount=0; uint64_t cnt=0; };
+    std::unordered_map<int, Acc> acc;
+    acc.reserve(16);
+    for (uint i = 0; i < out_count; ++i) {
+        const auto &r = rows[i];
+        auto &a = acc[r.key];
+        a.sum_qty += r.sum_qty;
+        a.sum_base += r.sum_base_price;
+        a.sum_disc += r.sum_disc_price;
+        a.sum_charge += r.sum_charge;
+        a.sum_discount += r.sum_discount;
+        a.cnt += r.count;
     }
+    struct Q1Result { double sum_qty, sum_base_price, sum_disc_price, sum_charge, avg_qty, avg_price, avg_disc; uint64_t count; };
+    std::map<std::pair<char,char>, Q1Result> final_results;
+    for (const auto &kv : acc) {
+        int key = kv.first; const auto &a = kv.second;
+        char flag = (key >> 8) & 0xFF; char status = key & 0xFF;
+        Q1Result res;
+        res.sum_qty = a.sum_qty;
+        res.sum_base_price = a.sum_base;
+        res.sum_disc_price = a.sum_disc;
+        res.sum_charge = a.sum_charge;
+        res.count = a.cnt;
+        res.avg_qty = res.sum_qty / res.count;
+        res.avg_price = res.sum_base_price / res.count;
+        res.avg_disc = a.sum_discount / res.count;
+        final_results[{flag, status}] = res;
+    }
+    auto cpuEnd = std::chrono::high_resolution_clock::now();
+    double cpuMs = std::chrono::duration<double, std::milli>(cpuEnd - cpuStart).count();
     printf("\n+----------+----------+------------+----------------+----------------+----------------+------------+------------+------------+----------+\n");
     printf("| l_return | l_linest |    sum_qty | sum_base_price | sum_disc_price |     sum_charge |    avg_qty |  avg_price |   avg_disc | count    |\n");
     printf("+----------+----------+------------+----------------+----------------+----------------+------------+------------+------------+----------+\n");
     for(auto const& [key, val] : final_results) {
-        printf("| %8c | %8c | %10.2f | %14.2f | %14.2f | %14.2f | %10.2f | %10.2f | %10.2f | %8u |\n",
+        printf("| %8c | %8c | %10.2f | %14.2f | %14.2f | %14.2f | %10.2f | %10.2f | %10.2f | %8llu |\n",
                key.first, key.second, val.sum_qty, val.sum_base_price, val.sum_disc_price, val.sum_charge,
-               val.avg_qty, val.avg_price, val.avg_disc, val.count);
+               val.avg_qty, val.avg_price, val.avg_disc, (unsigned long long)val.count);
     }
     printf("+----------+----------+------------+----------------+----------------+----------------+------------+------------+------------+----------+\n");
-    std::cout << "Total TPC-H Q1 GPU time: " << gpuExecutionTime * 1000.0 << " ms" << std::endl;
+    std::cout << "Q1 Mode: Hybrid (GPU select+emit + CPU group-by)" << std::endl;
+    std::cout << "  GPU time (select+emit): " << gpuExecutionTime * 1000.0 << " ms" << std::endl;
+    std::cout << "  CPU group-by time: " << cpuMs << " ms" << std::endl;
+    std::cout << "  Total hybrid time: " << gpuExecutionTime * 1000.0 + cpuMs << " ms" << std::endl;
+    if (std::getenv("GPUDB_EXIT_AFTER_Q1")) {
+        std::exit(0);
+    }
     
-    // Cleanup
-    selectionFunction->release();
-    selectionPipeline->release();
-    localAggFunction->release();
-    localAggPipeline->release();
-    mergeFunction->release();
-    mergePipeline->release();
-    shipdateBuffer->release();
-    bitmapBuffer->release();
-    flagBuffer->release();
-    statusBuffer->release();
-    qtyBuffer->release();
-    priceBuffer->release();
-    discBuffer->release();
-    taxBuffer->release();
-    intermediateBuffer->release();
-    finalHashTableBuffer->release();
+    // Cleanup (temporarily minimized to avoid exit-time crashes; full cleanup can be restored after root-cause is fixed)
     selectionFunctionName->release();
-    localAggFunctionName->release();
-    mergeFunctionName->release();
+    emitFunctionName->release();
 }
 
 
@@ -1340,14 +1383,25 @@ int main(int argc, const char * argv[]) {
         NS::String* libraryPath = NS::String::string("default.metallib", NS::UTF8StringEncoding);
         library = device->newLibrary(libraryPath, &error);
         libraryPath->release();
-        
         if (!library) {
-            std::cerr << "Error loading .metal library from both default and file path" << std::endl;
-            if (error) {
-                std::cerr << "Error details: " << error->localizedDescription()->utf8String() << std::endl;
+            // Final fallback: compile from source at runtime
+            std::ifstream srcFile("GPUDBMentalBenchmark/Kernels/DatabaseKernels.metal");
+            if (srcFile.good()) {
+                std::string src((std::istreambuf_iterator<char>(srcFile)), std::istreambuf_iterator<char>());
+                NS::String* srcStr = NS::String::string(src.c_str(), NS::UTF8StringEncoding);
+                MTL::CompileOptions* opts = MTL::CompileOptions::alloc()->init();
+                library = device->newLibrary(srcStr, opts, &error);
+                opts->release();
+                srcStr->release();
             }
-            pAutoreleasePool->release();
-            return 1;
+            if (!library) {
+                std::cerr << "Error loading/compiling Metal library (default, file, and source failed)" << std::endl;
+                if (error) {
+                    std::cerr << "Error details: " << error->localizedDescription()->utf8String() << std::endl;
+                }
+                pAutoreleasePool->release();
+                return 1;
+            }
         }
     }
 

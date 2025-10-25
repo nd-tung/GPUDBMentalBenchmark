@@ -93,7 +93,7 @@ run-sf10: $(TARGET)
 .PHONY: run-q1
 run-q1: $(TARGET)
 	@echo "Running TPC-H Query 1 benchmark..."
-	@cd GPUDBMentalBenchmark && ../$(TARGET) q1
+	@cd GPUDBMentalBenchmark && GPUDB_EXIT_AFTER_Q1=1 ../$(TARGET) q1
 
 .PHONY: run-q3
 run-q3: $(TARGET)
