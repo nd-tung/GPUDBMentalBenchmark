@@ -1576,10 +1576,12 @@ kernel void q9_probe_and_local_agg_kernel(
     uint thread_id_in_group [[thread_index_in_threadgroup]],
     uint threads_per_group [[threads_per_threadgroup]])
 {
-    const int local_ht_size = 128;
-    thread Q9Aggregates_Local local_ht[local_ht_size];
+    const int local_ht_size = 256;
+    threadgroup Q9Aggregates_Local local_ht[local_ht_size];
+    threadgroup atomic_int tg_locks[local_ht_size]; // 0=unlocked, 1=locked
     for (int i = thread_id_in_group; i < local_ht_size; i += threads_per_group) {
         local_ht[i].key = 0; local_ht[i].profit = 0.0f;
+        atomic_store_explicit(&tg_locks[i], 0, memory_order_relaxed);
     }
     threadgroup_barrier(mem_flags::mem_threadgroup);
 
@@ -1655,10 +1657,20 @@ kernel void q9_probe_and_local_agg_kernel(
 
         for(int k = 0; k < local_ht_size; ++k) {
             uint probe_idx = (agg_hash + k) % local_ht_size;
-            if(local_ht[probe_idx].key == 0 || local_ht[probe_idx].key == agg_key) {
-                local_ht[probe_idx].key = agg_key;
-                local_ht[probe_idx].profit += profit;
-                break;
+            int expected = 0;
+            if (atomic_compare_exchange_weak_explicit(&tg_locks[probe_idx], &expected, 1, memory_order_relaxed, memory_order_relaxed)) {
+                if (local_ht[probe_idx].key == 0) {
+                    local_ht[probe_idx].key = agg_key;
+                    local_ht[probe_idx].profit = profit;
+                    atomic_store_explicit(&tg_locks[probe_idx], 0, memory_order_relaxed);
+                    break;
+                } else if (local_ht[probe_idx].key == agg_key) {
+                    local_ht[probe_idx].profit += profit;
+                    atomic_store_explicit(&tg_locks[probe_idx], 0, memory_order_relaxed);
+                    break;
+                }
+                // release and continue probing
+                atomic_store_explicit(&tg_locks[probe_idx], 0, memory_order_relaxed);
             }
         }
     }
