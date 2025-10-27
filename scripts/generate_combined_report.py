@@ -10,13 +10,16 @@ results_dir = os.path.join(repo_dir, 'benchmark_results')
 def load_duckdb_results(path):
     import re
     rows = []
-    line_re = re.compile(r"^(\d{8}_\d{6}),(SF-1|SF-10),(.*?),(\d+\.?\d*),")
+    # Supports both legacy (exec only) and new (exec, wall) formats:
+    # Legacy: timestamp,sf,bench,exec_ms,result
+    # New:    timestamp,sf,bench,exec_ms,wall_ms,result
+    line_re = re.compile(r"^(\d{8}_\d{6}),(SF-1|SF-10),(.*?),(\d+\.?\d*)(?:,(\d+\.?\d*))?,")
     with open(path, 'r') as f:
         for line in f:
             m = line_re.match(line.strip())
             if not m:
                 continue
-            ts, sf, bench, time_ms = m.groups()
+            ts, sf, bench, exec_ms, wall_ms = m.groups()
             key = None
             if bench == 'TPC-H Query 1': key = 'Q1'
             elif bench == 'TPC-H Query 3': key = 'Q3'
@@ -24,11 +27,14 @@ def load_duckdb_results(path):
             elif bench.startswith('TPC-H Query 9'): key = 'Q9'
             elif bench == 'TPC-H Query 13': key = 'Q13'
             if key:
+                exec_val = float(exec_ms)
+                wall_val = float(wall_ms) if wall_ms is not None else exec_val
                 rows.append({
                     'timestamp': ts,
                     'scale_factor': sf,
                     'query': key,
-                    'duckdb_time_ms': float(time_ms)
+                    'duckdb_time_ms': exec_val,
+                    'duckdb_wall_ms': wall_val,
                 })
     return rows
 
@@ -61,7 +67,10 @@ def generate_report(duckdb_csv, gpu_csv, out_path):
     with open(out_path, 'w') as out:
         out.write(f"# Combined DuckDB vs GPU Benchmark\n\n")
         out.write(f"Generated: {datetime.now().isoformat()}\n\n")
-        out.write("Notes:\n- DuckDB times are execution-only.\n- GPU times report compute-only and wall-clock. CPU merge (if any) is shown.\n\n")
+        out.write("Notes:\n")
+        out.write("- DuckDB exec (ms) is used for comparison and comes from DuckDB's profiler when available (falls back to measured time).\n")
+        out.write("- GPU compute is device-only; GPU wall-clock includes submission/queue/sync; CPU merge (if any) is listed.\n")
+        out.write("- Primary comparison (execution-only): DuckDB exec vs (GPU compute + CPU merge).\n\n")
         for sf in sfs:
             out.write(f"## {sf}\n\n")
             out.write("| Query | DuckDB exec (ms) | GPU compute (ms) | GPU wall-clock (ms) | CPU merge (ms) |\n")

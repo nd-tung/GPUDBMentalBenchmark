@@ -30,28 +30,68 @@ print_header() {
     echo -e "${YELLOW}--- $1 ---${NC}"
 }
 
-# Function to execute DuckDB command with proper timing
+# Function to execute DuckDB command with proper timing (exec-only and wall-clock)
 execute_sql() {
     local description="$1"
     local sql_command="$2"
     local scale_factor="$3"
-    
+
     echo -e "${GREEN}$description${NC}"
-    
-    # Execute with high precision timing
-    start_time=$(python3 -c "import time; print(time.time())")
-    result=$(duckdb "$DB_FILE" -c "$sql_command" 2>/dev/null)
-    end_time=$(python3 -c "import time; print(time.time())")
-    
-    # Calculate execution time in milliseconds
-    execution_time=$(python3 -c "print(round(($end_time - $start_time) * 1000, 2))")
-    
-    echo "Execution time: ${execution_time} ms"
-    echo "Result: $result"
+
+    # Use DuckDB JSON profiling to capture exec-only; write to temp file to avoid parsing stdout
+    local PROF_FILE="/tmp/duckdb_profile_${TIMESTAMP}_$$.json"
+
+    # Wall-clock around the DuckDB call
+    local start_ms=$(python3 - <<'PY'
+import time; print(int(time.time()*1000))
+PY
+)
+
+    # Run query with profiling enabled; results printed to stdout; profiling JSON to file
+    local cmd_output
+    cmd_output=$(duckdb "$DB_FILE" << EOF 2>/dev/null
+PRAGMA enable_profiling='json';
+PRAGMA profiling_output='$PROF_FILE';
+$sql_command;
+EOF
+)
+
+    local end_ms=$(python3 - <<'PY'
+import time; print(int(time.time()*1000))
+PY
+)
+
+    local wall_ms=$((end_ms - start_ms))
+
+    # Extract exec-only timing from JSON (seconds -> ms); fallback to wall_ms if jq missing or parse fails
+    local exec_ms=""
+    if command -v jq >/dev/null 2>&1 && [[ -s "$PROF_FILE" ]]; then
+        # Pick the last available timing value in the profile, which corresponds to the query
+        local secs
+        secs=$(jq -r '..|.timing? // empty' "$PROF_FILE" | tail -n1)
+        if [[ -n "$secs" && "$secs" != "null" ]]; then
+            exec_ms=$(python3 - <<PY
+secs = float("$secs")
+print(f"{secs*1000:.2f}")
+PY
+)
+        fi
+    fi
+    rm -f "$PROF_FILE" >/dev/null 2>&1 || true
+    if [[ -z "$exec_ms" ]]; then
+        exec_ms="$wall_ms"
+    fi
+
+    echo "Exec-only (DuckDB profiler): ${exec_ms} ms"
+
+    # Optionally print a compact result preview (last line)
+    local preview
+    preview=$(printf "%s\n" "$cmd_output" | tail -n 1)
+    echo "Result (preview): $preview"
     echo
-    
-    # Log results
-    echo "$TIMESTAMP,$scale_factor,$description,$execution_time,$result" >> "$RESULTS_DIR/duckdb_results.csv"
+
+    # Log results: timestamp,scale_factor,benchmark,exec_ms,result_preview
+    echo "$TIMESTAMP,$scale_factor,$description,$exec_ms,$preview" >> "$RESULTS_DIR/duckdb_results.csv"
 }
 
 # Check if DuckDB is installed
@@ -70,6 +110,15 @@ check_python() {
         exit 1
     fi
     echo -e "${GREEN}Python3 found for timing${NC}"
+}
+
+# Optional: check for jq for JSON parsing (falls back gracefully if missing)
+check_jq() {
+    if ! command -v jq &> /dev/null; then
+        echo -e "${YELLOW}Warning: 'jq' not found. Using wall-clock as exec-only fallback.${NC}"
+    else
+        echo -e "${GREEN}jq found for profiling JSON parsing${NC}"
+    fi
 }
 
 # Check if data files exist
@@ -97,7 +146,7 @@ check_data_files() {
 setup_results() {
     mkdir -p "$RESULTS_DIR"
     if [[ ! -f "$RESULTS_DIR/duckdb_results.csv" ]]; then
-        echo "timestamp,scale_factor,benchmark,execution_time_ms,result" > "$RESULTS_DIR/duckdb_results.csv"
+        echo "timestamp,scale_factor,benchmark,exec_ms,result" > "$RESULTS_DIR/duckdb_results.csv"
     fi
 }
 
@@ -522,6 +571,7 @@ main() {
     
     check_duckdb
     check_python
+    check_jq
     setup_results
     init_duckdb
     
