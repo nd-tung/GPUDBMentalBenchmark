@@ -475,6 +475,7 @@ void runQ1Benchmark(MTL::Device* device, MTL::CommandQueue* commandQueue, MTL::L
     // No compaction needed for fixed bins
 
     // Dispatch kernels
+    auto q1_e2e_start = std::chrono::high_resolution_clock::now();
     MTL::CommandBuffer* commandBuffer = commandQueue->commandBuffer();
     const int cutoffDate = 19980902; // DATE '1998-12-01' - INTERVAL '90' DAY
 
@@ -529,7 +530,10 @@ void runQ1Benchmark(MTL::Device* device, MTL::CommandQueue* commandQueue, MTL::L
     commandBuffer->commit();
     commandBuffer->waitUntilCompleted();
     auto gpuEnd = std::chrono::high_resolution_clock::now();
-    double gpuMs = std::chrono::duration<double, std::milli>(gpuEnd - gpuStart).count();
+    double q1_wall_ms = std::chrono::duration<double, std::milli>(gpuEnd - gpuStart).count();
+    double q1_gpu_ms = (commandBuffer->GPUEndTime() - commandBuffer->GPUStartTime()) * 1000.0;
+    auto q1_e2e_end = std::chrono::high_resolution_clock::now();
+    double q1_e2e_ms = std::chrono::duration<double, std::milli>(q1_e2e_end - q1_e2e_start).count();
 
     // Read back final results
     long* sum_qty_c = (long*)f_sumQtyCents->contents();
@@ -572,7 +576,11 @@ void runQ1Benchmark(MTL::Device* device, MTL::CommandQueue* commandQueue, MTL::L
                val.avg_qty, val.avg_price, val.avg_disc, val.count);
     }
     printf("+----------+----------+------------+----------------+----------------+----------------+------------+------------+------------+----------+\n");
-    std::cout << "Total Q1 GPU time: " << gpuMs << " ms" << std::endl;
+    // Standardized timing prints
+    printf("Total TPC-H Q1 GPU time: %0.2f ms\n", q1_gpu_ms);
+    printf("Total TPC-H Q1 wall-clock: %0.2f ms\n", q1_wall_ms);
+    // Also report e2e in case host prep differs
+    printf("Total TPC-H Q1 end-to-end: %0.2f ms\n", q1_e2e_ms);
 
     // Cleanup
     stage1Fn->release(); stage1PSO->release(); stage2Fn->release(); stage2PSO->release();
@@ -671,6 +679,7 @@ void runQ3Benchmark(MTL::Device* pDevice, MTL::CommandQueue* pCommandQueue, MTL:
     MTL::Buffer* pFinalHTBuffer = pDevice->newBuffer(cpu_final_ht.data(), final_ht_size * sizeof(Q3Aggregates_CPU), MTL::ResourceStorageModeShared);
 
     // 4. Dispatch full pipeline
+    auto q3_e2e_start = std::chrono::high_resolution_clock::now();
     MTL::CommandBuffer* pCommandBuffer = pCommandQueue->commandBuffer();
     const int cutoff_date = 19950315;
 
@@ -774,6 +783,8 @@ void runQ3Benchmark(MTL::Device* pDevice, MTL::CommandQueue* pCommandQueue, MTL:
     });
     auto cpuMergeEnd = std::chrono::high_resolution_clock::now();
     double cpuMergeMs = std::chrono::duration<double, std::milli>(cpuMergeEnd - cpuMergeStart).count();
+    auto q3_e2e_end = std::chrono::high_resolution_clock::now();
+    double q3_e2e_ms = std::chrono::duration<double, std::milli>(q3_e2e_end - q3_e2e_start).count();
 
     printf("\nTPC-H Query 3 Results (Top 10):\n");
     printf("+----------+------------+------------+--------------+\n");
@@ -789,6 +800,9 @@ void runQ3Benchmark(MTL::Device* pDevice, MTL::CommandQueue* pCommandQueue, MTL:
     printf("  GPU time (build+probe): %0.3f ms\n", gpuExecutionTime * 1000.0);
     printf("  CPU merge time: %0.3f ms\n", cpuMergeMs);
     printf("  Total hybrid time: %0.3f ms\n", gpuExecutionTime * 1000.0 + cpuMergeMs);
+    // Standardized timing prints
+    printf("Total TPC-H Q3 GPU time: %0.2f ms\n", gpuExecutionTime * 1000.0);
+    printf("Total TPC-H Q3 wall-clock: %0.2f ms\n", q3_e2e_ms);
     
     //Cleanup
     pCustBuildFn->release();
@@ -922,12 +936,12 @@ void runQ6Benchmark(MTL::Device* device, MTL::CommandQueue* commandQueue, MTL::L
     stage2Encoder->endEncoding();
 
     // Execute and measure time
-    auto startTime = std::chrono::high_resolution_clock::now();
+    auto q6_e2e_start = std::chrono::high_resolution_clock::now();
     commandBuffer->commit();
     commandBuffer->waitUntilCompleted();
-    auto endTime = std::chrono::high_resolution_clock::now();
-    
-    double gpuExecutionTime = std::chrono::duration<double>(endTime - startTime).count();
+    auto q6_e2e_end = std::chrono::high_resolution_clock::now();
+    double q6_wall_s = std::chrono::duration<double>(q6_e2e_end - q6_e2e_start).count();
+    double q6_gpu_s = commandBuffer->GPUEndTime() - commandBuffer->GPUStartTime();
 
     // Get result
     float* resultData = (float*)finalRevenueBuffer->contents();
@@ -935,11 +949,13 @@ void runQ6Benchmark(MTL::Device* device, MTL::CommandQueue* commandQueue, MTL::L
 
     std::cout << "TPC-H Query 6 Result:" << std::endl;
     std::cout << "Total Revenue: $" << std::fixed << std::setprecision(2) << totalRevenue << std::endl;
-    std::cout << "GPU execution time: " << gpuExecutionTime * 1000.0 << " ms" << std::endl;
+    // Standardized timing prints
+    printf("Total TPC-H Q6 GPU time: %0.2f ms\n", q6_gpu_s * 1000.0);
+    printf("Total TPC-H Q6 wall-clock: %0.2f ms\n", q6_wall_s * 1000.0);
     
     // Calculate effective bandwidth (rough estimate)
     size_t totalDataBytes = dataSize * (sizeof(int) + 3 * sizeof(float)); // All input columns
-    double bandwidth = (totalDataBytes / (1024.0 * 1024.0 * 1024.0)) / gpuExecutionTime;
+    double bandwidth = (totalDataBytes / (1024.0 * 1024.0 * 1024.0)) / q6_wall_s;
     std::cout << "Effective Bandwidth: " << bandwidth << " GB/s" << std::endl << std::endl;
 
     // Cleanup
@@ -1249,9 +1265,7 @@ void runQ13Benchmark(MTL::Device* pDevice, MTL::CommandQueue* pCommandQueue, MTL
     MTL::ComputePipelineState* pLocalCountPipe = pDevice->newComputePipelineState(pLocalCountFn, &pError);
     MTL::Function* pMergeCountFn = pLibrary->newFunction(NS::String::string("q13_merge_counts_kernel", NS::UTF8StringEncoding));
     MTL::ComputePipelineState* pMergeCountPipe = pDevice->newComputePipelineState(pMergeCountFn, &pError);
-    MTL::Function* pLocalHistFn = pLibrary->newFunction(NS::String::string("q13_local_histogram_kernel", NS::UTF8StringEncoding));
-    MTL::ComputePipelineState* pLocalHistPipe = pDevice->newComputePipelineState(pLocalHistFn, &pError);
-    // NOTE: We no longer need the q13_merge_histogram_kernel pipeline state
+    // NOTE: We no longer need the q13_local_histogram_kernel/q13_merge_histogram_kernel pipelines
 
     // 3. Create Buffers
     const uint num_threadgroups = 2048;
@@ -1267,10 +1281,10 @@ void runQ13Benchmark(MTL::Device* pDevice, MTL::CommandQueue* pCommandQueue, MTL
     MTL::Buffer* pFinalCountsHTBuffer = pDevice->newBuffer(cpu_final_counts_ht.data(), final_count_ht_size * sizeof(Q13_OrderCount_CPU), MTL::ResourceStorageModeShared);
 
     MTL::Buffer* pCustKeyBuffer = pDevice->newBuffer(c_custkey.data(), customer_size * sizeof(int), MTL::ResourceStorageModeShared);
-    const uint inter_hist_size = num_threadgroups * 32;
-    MTL::Buffer* pInterHistBuffer = pDevice->newBuffer(inter_hist_size * sizeof(Q13_CustDist_CPU), MTL::ResourceStorageModeShared);
+    // Removed intermediate histogram buffer; final histogram is built on CPU from counts HT
 
     // 4. Dispatch the first 3 stages of the pipeline
+    auto q13_e2e_start = std::chrono::high_resolution_clock::now();
     MTL::CommandBuffer* pCommandBuffer = pCommandQueue->commandBuffer();
     
     MTL::ComputeCommandEncoder* pEnc1 = pCommandBuffer->computeCommandEncoder();
@@ -1288,15 +1302,7 @@ void runQ13Benchmark(MTL::Device* pDevice, MTL::CommandQueue* pCommandQueue, MTL
     pEnc2->dispatchThreads(MTL::Size(inter_count_size, 1, 1), MTL::Size(1024, 1, 1));
     pEnc2->endEncoding();
 
-    MTL::ComputeCommandEncoder* pEnc3 = pCommandBuffer->computeCommandEncoder();
-    pEnc3->setComputePipelineState(pLocalHistPipe);
-    pEnc3->setBuffer(pCustKeyBuffer, 0, 0); pEnc3->setBuffer(pFinalCountsHTBuffer, 0, 1);
-    pEnc3->setBuffer(pInterHistBuffer, 0, 2); pEnc3->setBytes(&customer_size, sizeof(customer_size), 3);
-    pEnc3->setBytes(&final_count_ht_size, sizeof(final_count_ht_size), 4);
-    pEnc3->dispatchThreadgroups(MTL::Size(num_threadgroups, 1, 1), MTL::Size(1024, 1, 1));
-    pEnc3->endEncoding();
-    
-    // NOTE: Stage 4 (final merge) is removed from the GPU pipeline
+    // NOTE: Removed Stage 2A/2B GPU histogram; CPU merge below is authoritative
 
     // 5. Execute GPU work
     pCommandBuffer->commit();
@@ -1305,6 +1311,7 @@ void runQ13Benchmark(MTL::Device* pDevice, MTL::CommandQueue* pCommandQueue, MTL
 
     // 6. Perform final merge on CPU (authoritative):
     // Probe the counts HT for each customer and build the exact histogram.
+    auto q13_cpu_merge_start = std::chrono::high_resolution_clock::now();
     struct Q13_OrderCount_CPU_local { uint custkey; uint order_count; };
     auto* counts_ht = (Q13_OrderCount_CPU_local*)pFinalCountsHTBuffer->contents();
     std::map<uint, uint> final_histogram;
@@ -1319,6 +1326,10 @@ void runQ13Benchmark(MTL::Device* pDevice, MTL::CommandQueue* pCommandQueue, MTL
         }
         final_histogram[order_count] += 1;
     }
+    auto q13_cpu_merge_end = std::chrono::high_resolution_clock::now();
+    double q13_cpu_merge_time = std::chrono::duration<double>(q13_cpu_merge_end - q13_cpu_merge_start).count();
+    auto q13_e2e_end = std::chrono::high_resolution_clock::now();
+    double q13_e2e_time = std::chrono::duration<double>(q13_e2e_end - q13_e2e_start).count();
 
     // 7. Process and print results
     std::vector<Q13Result> final_results;
@@ -1339,15 +1350,17 @@ void runQ13Benchmark(MTL::Device* pDevice, MTL::CommandQueue* pCommandQueue, MTL
         printf("| %7u | %8u |\n", res.c_count, res.custdist);
     }
     printf("+---------+----------+\n");
-    printf("Total TPC-H Q13 GPU time: %f ms\n", gpuExecutionTime * 1000.0);
+    printf("Total TPC-H Q13 GPU time: %0.2f ms\n", gpuExecutionTime * 1000.0);
+    printf("Q13 CPU merge time: %0.2f ms\n", q13_cpu_merge_time * 1000.0);
+    printf("Total TPC-H Q13 wall-clock: %0.2f ms\n", q13_e2e_time * 1000.0);
 
     // Release objects...
     pLocalCountFn->release(); pLocalCountPipe->release();
     pMergeCountFn->release(); pMergeCountPipe->release();
-    pLocalHistFn->release(); pLocalHistPipe->release();
+    // No local histogram pipeline to release
     pOrdCustKeyBuffer->release(); pOrdCommentBuffer->release();
     pInterCountsBuffer->release(); pFinalCountsHTBuffer->release();
-    pCustKeyBuffer->release(); pInterHistBuffer->release();
+    pCustKeyBuffer->release();
 }
 
 
@@ -1446,19 +1459,18 @@ int main(int argc, const char * argv[]) {
     } else {
         std::cerr << "Unknown query: " << query << std::endl;
         std::cerr << "Use 'help' to see available options." << std::endl;
-        // Cleanup and exit
-        library->release();
-        commandQueue->release();
-        device->release();
-        pAutoreleasePool->release();
+        // Cleanup and exit (skip explicit releases to avoid rare teardown crashes; OS will reclaim)
+        // library->release();
+        // commandQueue->release();
+        // device->release();
+        // pAutoreleasePool->release();
         return 1;
     }
     
-    // Cleanup
-    library->release();
-    commandQueue->release();
-    device->release();
-    
-    pAutoreleasePool->release();
+    // Cleanup (skip explicit releases to avoid teardown crash; process exit will free resources)
+    // library->release();
+    // commandQueue->release();
+    // device->release();
+    // pAutoreleasePool->release();
     return 0;
 }
