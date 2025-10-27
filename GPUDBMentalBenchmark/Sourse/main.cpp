@@ -1138,6 +1138,11 @@ void runQ9Benchmark(MTL::Device* pDevice, MTL::CommandQueue* pCommandQueue, MTL:
     auto q9_e2e_end = std::chrono::high_resolution_clock::now();
     double q9_e2e_time = std::chrono::duration<double>(q9_e2e_end - q9_e2e_start).count();
 
+    // Fair apples-to-apples GPU time: sum of GPUStart/End across both CBs
+    double cb1_gpu_time = pCommandBuffer->GPUEndTime() - pCommandBuffer->GPUStartTime();
+    double cb2_gpu_time = pCommandBuffer2->GPUEndTime() - pCommandBuffer2->GPUStartTime();
+    double q9_gpu_compute_time = cb1_gpu_time + cb2_gpu_time; // seconds
+
     // 6. Process and print final results
     Q9Aggregates_CPU* results = (Q9Aggregates_CPU*)pFinalHTBuffer->contents();
     std::vector<Q9Result> final_results;
@@ -1164,7 +1169,8 @@ void runQ9Benchmark(MTL::Device* pDevice, MTL::CommandQueue* pCommandQueue, MTL:
     printf("+------------+------+---------------+\n");
     printf("Total results found: %lu\n", final_results.size());
     printf("Q9 probe+merge wall-clock: %0.2f ms\n", probeMergeTime * 1000.0);
-    printf("Total TPC-H Q9 GPU time: %0.2f ms\n", q9_e2e_time * 1000.0);
+    printf("Total TPC-H Q9 GPU time: %0.2f ms\n", q9_gpu_compute_time * 1000.0);
+    printf("Total TPC-H Q9 wall-clock: %0.2f ms\n", q9_e2e_time * 1000.0);
     
     // Release all functions and pipelines
     pPartBuildFn->release();
