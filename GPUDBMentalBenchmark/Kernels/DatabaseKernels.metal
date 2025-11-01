@@ -199,6 +199,7 @@ struct Q1Aggregates_Local {
 
 // STAGE 1: Each threadgroup creates its own private hash table in threadgroup memory
 // and performs a local aggregation.
+#if 0 // UNUSED: Not referenced by host code (Q1 uses integer-cent two-pass path)
 kernel void q1_local_aggregation_kernel(
     const device uint* selection_bitmap,
     const device char* l_returnflag,
@@ -259,6 +260,7 @@ kernel void q1_local_aggregation_kernel(
         }
     }
 }
+#endif // q1_local_aggregation_kernel
 
 
 // --- Q1 GPU-centric path: Direct global accumulation + GPU compaction ---
@@ -266,6 +268,7 @@ kernel void q1_local_aggregation_kernel(
 // Keys are packed as 16-bit: (returnflag << 8) | linestatus, so we use tables of size 65536.
 
 // Kernel A: Stream all rows, apply selection, and atomically accumulate per-key aggregates.
+#if 0 // UNUSED: Alternative Q1 GPU-centric float path (not used by host)
 kernel void q1_gpu_accumulate_kernel(
     const device int*   l_shipdate,
     const device char*  l_returnflag,
@@ -365,8 +368,10 @@ kernel void q1_gpu_accumulate_kernel(
         }
     }
 }
+#endif // q1_gpu_accumulate_kernel
 
 // Optimized variant: use threadgroup-local aggregation to drastically reduce global atomics.
+#if 0 // UNUSED: Alternative Q1 threadgroup-accumulate float path (not used by host)
 kernel void q1_gpu_tg_accumulate_kernel(
     const device int*   l_shipdate,
     const device char*  l_returnflag,
@@ -541,9 +546,11 @@ kernel void q1_gpu_tg_accumulate_kernel(
         }
     }
 }
+#endif // q1_gpu_tg_accumulate_kernel
 
 // Kernel B: Compact non-empty keys into a dense output array for host consumption.
 // Reuses Q1Aggregates_Local as the output record format.
+#if 0 // UNUSED: Q1 compaction for 65k-key path (not used by host)
 kernel void q1_compact_results_kernel(
     const device atomic_float* g_sum_qty,
     const device atomic_float* g_sum_base_price,
@@ -571,6 +578,7 @@ kernel void q1_compact_results_kernel(
     rec.count = c;
     out_results[pos] = rec;
 }
+#endif // q1_compact_results_kernel
 
 // --- Q1 Specialized low-cardinality bins path ---
 // Exploits the fact that Q1 groups only by l_returnflag in {A,N,R} and l_linestatus in {F,O}.
@@ -582,6 +590,7 @@ inline int q1_ls_index(char ls) {
     return (ls == 'F') ? 0 : (ls == 'O') ? 1 : -1;
 }
 
+#if 0 // UNUSED: Q1 float-bins variant (host uses integer-cent two-pass instead)
 kernel void q1_bins_accumulate_kernel(
     const device int*   l_shipdate,
     const device char*  l_returnflag,
@@ -644,6 +653,7 @@ kernel void q1_bins_accumulate_kernel(
         atomic_fetch_add_explicit(&g_count_bins[b], c, memory_order_relaxed);
     }
 }
+#endif // q1_bins_accumulate_kernel
 
 // --- Q1 Integer-cent two-pass path ---
 // Stage 1: Per-thread local accumulation into 6 bins using integer cents (and basis points),
@@ -877,6 +887,7 @@ kernel void q1_bins_reduce_int_stage2(
 }
 
 // STAGE 2: A second kernel merges the many small local results into one final hash table.
+#if 0 // UNUSED: Merge for Q1 local-HT path (not used by host)
 kernel void q1_merge_kernel(
     const device Q1Aggregates_Local* intermediate_results,
     device Q1Aggregates* final_hash_table,
@@ -925,6 +936,7 @@ kernel void q1_merge_kernel(
         }
     }
 }
+#endif // q1_merge_kernel
 
 
 // --- TPC-H Q6 KERNELS ---
@@ -1864,6 +1876,7 @@ kernel void q13_merge_counts_kernel(
 
 
 // KERNEL 2A: Stage 2, Local Histogram. Scans CUSTOMER, probes counts HT, builds local histogram.
+#if 0 // UNUSED: Q13 histogram on GPU (host performs CPU histogram now)
 kernel void q13_local_histogram_kernel(
     const device int* c_custkey,
     const device Q13_OrderCount* customer_order_counts_ht,
@@ -1912,9 +1925,11 @@ kernel void q13_local_histogram_kernel(
         }
     }
 }
+#endif // q13_local_histogram_kernel
 
 
 // KERNEL 2B: Stage 2, Merge Histogram. Merges partial histograms into final result.
+#if 0 // UNUSED: Q13 histogram merge on GPU (host performs CPU histogram now)
 kernel void q13_merge_histogram_kernel(
     const device Q13_CustDist_Local* intermediate_histograms,
     device Q13_CustDist* final_histogram_ht,
@@ -1941,3 +1956,4 @@ kernel void q13_merge_histogram_kernel(
         }
     }
 }
+#endif // q13_merge_histogram_kernel
