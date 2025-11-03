@@ -1,4 +1,4 @@
-timestamp,scale_factor,query,gpu_time_ms,wall_clock_ms,cpu_merge_ms,execute_time_gpu_cpu_ms
+timestamp,scale_factor,query,gpu_time_ms,wall_clock_ms,cpu_merge_ms,execution_time_gpu_cpu_ms
 20251103_162527,SF-1,Q1,35.22,41.78,0.0,35.22
 20251103_162527,SF-1,Q13,35.13,47.65,1.89,37.02
 20251103_162527,SF-1,Q3,10.07,21.64,1.47,11.540000000000001

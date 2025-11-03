@@ -11,7 +11,7 @@ GPU_CSV="$RESULTS_DIR/gpu_results.csv"
 
 # CSV header
 if [[ ! -f "$GPU_CSV" ]]; then
-  echo "timestamp,scale_factor,query,gpu_time_ms,wall_clock_ms,cpu_merge_ms,execute_time_gpu_cpu_ms" > "$GPU_CSV"
+  echo "timestamp,scale_factor,query,gpu_time_ms,wall_clock_ms,cpu_merge_ms,execution_time_gpu_cpu_ms" > "$GPU_CSV"
 fi
 
 run_and_capture() {
