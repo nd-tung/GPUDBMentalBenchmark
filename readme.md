@@ -10,7 +10,7 @@ GPU-accelerated database operations using Apple Metal vs DuckDB vs CedarDB compa
 ### GPU Metal Results (Timestamp: 20251103_162527)
 
 #### SF-1 Dataset (6M lineitem rows)
-| Query | GPU Time (ms) | Wall Clock (ms) | CPU Merge (ms) | Execute Time (GPU+CPU) (ms) |
+| Query | GPU Time (ms) | Wall Clock (ms) | CPU Merge (ms) | Execution Time (GPU+CPU) (ms) |
 |-------|--------------|----------------|----------------|----------------------------|
 | Q1    | 35.22        | 41.78          | 0.00           | 35.22                      |
 | Q3    | 10.07        | 21.64          | 1.47           | 11.54                      |
@@ -19,7 +19,7 @@ GPU-accelerated database operations using Apple Metal vs DuckDB vs CedarDB compa
 | Q13   | 35.13        | 47.65          | 1.89           | 37.02                      |
 
 #### SF-10 Dataset (60M lineitem rows)
-| Query | GPU Time (ms) | Wall Clock (ms) | CPU Merge (ms) | Execute Time (GPU+CPU) (ms) |
+| Query | GPU Time (ms) | Wall Clock (ms) | CPU Merge (ms) | Execution Time (GPU+CPU) (ms) |
 |-------|--------------|----------------|----------------|----------------------------|
 | Q1    | 171.67       | 350.39         | 0.00           | 171.67                     |
 | Q3    | 45.41        | 546.58         | 20.25          | 65.66                      |
