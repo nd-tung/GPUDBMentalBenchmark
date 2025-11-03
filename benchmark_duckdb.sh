@@ -84,14 +84,8 @@ PY
 
     echo "Exec-only (DuckDB profiler): ${exec_ms} ms"
 
-    # Optionally print a compact result preview (last line)
-    local preview
-    preview=$(printf "%s\n" "$cmd_output" | tail -n 1)
-    echo "Result (preview): $preview"
-    echo
-
-    # Log results: timestamp,scale_factor,benchmark,exec_ms,result_preview
-    echo "$TIMESTAMP,$scale_factor,$description,$exec_ms,$preview" >> "$RESULTS_DIR/duckdb_results.csv"
+    # Log results: timestamp,scale_factor,benchmark,exec_ms (no preview to avoid artifacts)
+    echo "$TIMESTAMP,$scale_factor,$description,$exec_ms" >> "$RESULTS_DIR/duckdb_results.csv"
 }
 
 # Check if DuckDB is installed
@@ -375,39 +369,10 @@ run_benchmarks() {
     check_data_files "$scale_factor"
     load_data "$scale_factor"
     
-    # 1. Selection Benchmarks (now using pre-loaded table)
-    print_header "Selection Benchmarks ($scale_factor) - In Memory"
-    
-    execute_sql "Selection < 1000" \
-        "SELECT COUNT(*) FROM lineitem WHERE l_partkey < 1000;" \
-        "$scale_factor"
-    
-    execute_sql "Selection < 10000" \
-        "SELECT COUNT(*) FROM lineitem WHERE l_partkey < 10000;" \
-        "$scale_factor"
-    
-    execute_sql "Selection < 50000" \
-        "SELECT COUNT(*) FROM lineitem WHERE l_partkey < 50000;" \
-        "$scale_factor"
-    
-    # 2. Aggregation Benchmark
-    print_header "Aggregation Benchmark ($scale_factor) - In Memory"
-    
-    execute_sql "SUM(l_quantity)" \
-        "SELECT SUM(l_quantity) FROM lineitem;" \
-        "$scale_factor"
-    
-    # 3. Join Benchmark
-    print_header "Join Benchmark ($scale_factor) - In Memory"
-    
-    execute_sql "Hash Join (lineitem JOIN orders)" \
-        "SELECT COUNT(*) FROM lineitem l JOIN orders o ON l.l_orderkey = o.o_orderkey;" \
-        "$scale_factor"
-    
     # 4. TPC-H Query 1 Benchmark
     print_header "TPC-H Query 1 Benchmark ($scale_factor) - In Memory"
     
-    execute_sql "TPC-H Query 1" \
+    execute_sql "Q1" \
         "SELECT
             l_returnflag,
             l_linestatus,
@@ -428,7 +393,7 @@ run_benchmarks() {
     # 5. TPC-H Query 3 Benchmark (Shipping Priority Query)
     print_header "TPC-H Query 3 Benchmark ($scale_factor) - In Memory"
     
-    execute_sql "TPC-H Query 3" \
+    execute_sql "Q3" \
         "SELECT
             l.l_orderkey,
             SUM(l.l_extendedprice * (1 - l.l_discount)) AS revenue,
@@ -448,7 +413,7 @@ run_benchmarks() {
     # 6. TPC-H Query 6 Benchmark (Forecasting Revenue Change Query)
     print_header "TPC-H Query 6 Benchmark ($scale_factor) - In Memory"
     
-    execute_sql "TPC-H Query 6" \
+    execute_sql "Q6" \
         "SELECT
             SUM(l_extendedprice * l_discount) AS revenue
         FROM lineitem
@@ -461,7 +426,7 @@ run_benchmarks() {
     # 7. TPC-H Query 9 Benchmark (Standard) - Product Type Profit Measure
     print_header "TPC-H Query 9 Benchmark ($scale_factor) - Standard"
     
-    execute_sql "TPC-H Query 9 (standard)" \
+    execute_sql "Q9" \
         "SELECT 
             n.n_name AS nation,
             EXTRACT(YEAR FROM o.o_orderdate) AS o_year,
@@ -481,7 +446,7 @@ run_benchmarks() {
     # 8. TPC-H Query 13 Benchmark (Customer Distribution Query)
     print_header "TPC-H Query 13 Benchmark ($scale_factor) - In Memory"
     
-    execute_sql "TPC-H Query 13" \
+    execute_sql "Q13" \
         "SELECT
             c_count,
             COUNT(*) AS custdist
@@ -500,55 +465,6 @@ run_benchmarks() {
         "$scale_factor"
 }
 
-# Generate comparison report
-generate_report() {
-    local report_file="$RESULTS_DIR/comparison_report_$TIMESTAMP.md"
-    
-    cat > "$report_file" << EOF
-# DuckDB vs GPU Database Benchmark Results
-
-**Generated:** $(date)
-**DuckDB Version:** $(duckdb --version)
-
-## Test Environment
-- **Hardware:** $(sysctl -n machdep.cpu.brand_string)
-- **Memory:** $(sysctl -n hw.memsize | awk '{print $1/1024/1024/1024 " GB"}')
-- **OS:** $(sw_vers -productName) $(sw_vers -productVersion)
-
-## Benchmark Methodology
-- **Data Loading:** Pre-loaded into memory tables (one-time cost, excluded from measurements)
-- **Query Execution:** Measured only pure query execution time
-- **DuckDB Settings:** Optimized with parallel processing, memory limits, and threading
-- **Timing Precision:** High-precision Python timing (microsecond accuracy)
-
-## Performance Results
-
-The following results compare DuckDB (CPU-based analytical database) 
-against the custom GPU implementation using Metal compute shaders.
-
-### TPC-H Queries Benchmarked:
-- **Q1:** Pricing Summary Report Query
-- **Q3:** Shipping Priority Query  
-- **Q6:** Forecasting Revenue Change Query
-- **Q9:** Product Type Profit Measure Query
-- **Q13:** Customer Distribution Query
-
-### Additional Benchmarks:
-- Selection queries with various selectivity
-- Aggregation operations
-- Hash join operations
-
-
-EOF
-
-    if [[ -f "$RESULTS_DIR/duckdb_results.csv" ]]; then
-        echo "### DuckDB Results" >> "$report_file"
-        echo '```' >> "$report_file"
-        tail -n +2 "$RESULTS_DIR/duckdb_results.csv" | column -t -s',' >> "$report_file"
-        echo '```' >> "$report_file"
-    fi
-    
-    echo -e "${GREEN}Report generated: $report_file${NC}"
 }
 
 # Cleanup function
@@ -584,16 +500,10 @@ main() {
         fi
     done
     
-    generate_report
     cleanup
     
     echo -e "${GREEN}Benchmark completed!${NC}"
-    echo -e "${BLUE}Results saved in: $RESULTS_DIR${NC}"
-    echo
-    echo -e "${YELLOW}To view results:${NC}"
-    echo "  cat $RESULTS_DIR/duckdb_results.csv"
-    echo "  cat $RESULTS_DIR/comparison_report_$TIMESTAMP.md"
-    echo "  cat $RESULTS_DIR/latest_comparison_report.md"
+    echo -e "${BLUE}Results saved in: $RESULTS_DIR/duckdb_results.csv${NC}"
 }
 
 # Set trap for cleanup

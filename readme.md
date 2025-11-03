@@ -1,74 +1,126 @@
 # GPU Database Benchmark
 
-GPU-accelerated database operations using Apple Metal vs DuckDB comparison.
+GPU-accelerated database operations using Apple Metal vs DuckDB vs CedarDB comparison.
 
-## Latest Results
+## Latest Benchmark Results
 
-### SF-1 Dataset (6M rows)
-| Operation | GPU (Metal) | DuckDB | Speedup |
-|-----------|-------------|---------|---------|
-| Selection < 1000 | 0.95 ms | 47.78 ms | **50x** |
-| Selection < 10000 | 0.92 ms | 46.61 ms | **51x** |
-| Selection < 50000 | 0.98 ms | 46.94 ms | **48x** |
-| SUM Aggregation | 1.32 ms | 47.03 ms | **36x** |
-| Hash Join | 14.49 ms | 87.13 ms | **6x** |
-| TPC-H Query 1 | 38.84 ms | 82.48 ms | **2.12x** |
+**Timestamp**: 2025-11-03  
+**Methodology**: Warm cache (data pre-loaded), execution time only
 
-### SF-10 Dataset (60M rows)
-| Operation | GPU (Metal) | DuckDB | Speedup |
-|-----------|-------------|---------|---------|
-| Selection < 1000 | 8.15 ms | 210.79 ms | **26x** |
-| Selection < 10000 | 8.05 ms | 95.50 ms | **12x** |
-| Selection < 50000 | 8.11 ms | 95.02 ms | **12x** |
-| SUM Aggregation | 4.66 ms | 120.01 ms | **26x** |
-| Hash Join | 58.12 ms | 486.42 ms | **8x** |
-| TPC-H Query 1 | 384.37 ms | 598.55 ms | **1.56x** |
+### GPU Metal Results (Timestamp: 20251103_162527)
 
-### TPC-H Queries (apples-to-apples)
+#### SF-1 Dataset (6M lineitem rows)
+| Query | GPU Time (ms) | Wall Clock (ms) | CPU Merge (ms) | Execute Time (GPU+CPU) (ms) |
+|-------|--------------|----------------|----------------|----------------------------|
+| Q1    | 35.22        | 41.78          | 0.00           | 35.22                      |
+| Q3    | 10.07        | 21.64          | 1.47           | 11.54                      |
+| Q6    | 1.86         | 4.49           | 0.00           | 1.86                       |
+| Q9    | 32.35        | 55.15          | 0.02           | 32.37                      |
+| Q13   | 35.13        | 47.65          | 1.89           | 37.02                      |
 
-Notes:
-- DuckDB times are execution-only (no data load).
-- GPU Total = GPU wall-clock + CPU merge (if any). Use this to compare with DuckDB.
-- GPU compute (device-only) is available in the combined report for diagnostics.
+#### SF-10 Dataset (60M lineitem rows)
+| Query | GPU Time (ms) | Wall Clock (ms) | CPU Merge (ms) | Execute Time (GPU+CPU) (ms) |
+|-------|--------------|----------------|----------------|----------------------------|
+| Q1    | 171.67       | 350.39         | 0.00           | 171.67                     |
+| Q3    | 45.41        | 546.58         | 20.25          | 65.66                      |
+| Q6    | 11.14        | 164.80         | 0.00           | 11.14                      |
+| Q9    | 390.81       | 876.98         | 0.14           | 390.95                     |
+| Q13   | 278.96       | 483.53         | 26.43          | 305.39                     |
 
-#### SF-1
+### DuckDB Results (Timestamp: 20251103_162622)
 
-| Query | DuckDB exec (ms) | GPU Total (ms) | Speedup |
-|------:|------------------:|---------------:|--------:|
-| Q1 | 82.48 | 38.84 | 2.12x |
-| Q3 | 59.38 | 54.34 | 1.09x |
-| Q6 | 44.87 | 4.30 | 10.43x |
-| Q9 | 112.73 | 54.10 | 2.08x |
-| Q13 | 99.25 | 50.70 | 1.96x |
+#### SF-1 Dataset
+| Query | Execution Time (ms) |
+|-------|---------------------|
+| Q1    | 89                  |
+| Q3    | 61                  |
+| Q6    | 46                  |
+| Q9    | 113                 |
+| Q13   | 102                 |
 
-#### SF-10
+#### SF-10 Dataset
+| Query | Execution Time (ms) |
+|-------|---------------------|
+| Q1    | 591                 |
+| Q3    | 324                 |
+| Q6    | 183                 |
+| Q9    | 929                 |
+| Q13   | 822                 |
 
-| Query | DuckDB exec (ms) | GPU Total (ms) | Speedup |
-|------:|------------------:|---------------:|--------:|
-| Q1 | 598.55 | 384.37 | 1.56x |
-| Q3 | 317.87 | 514.95 | 0.62x |
-| Q6 | 165.17 | 155.24 | 1.06x |
-| Q9 | 1176.68 | 795.72 | 1.48x |
-| Q13 | 1044.42 | 659.59 | 1.58x |
+### CedarDB Results (Timestamps: 20251103_164713 for SF-1, 20251103_153654 for SF-10)
 
-## How to Run
+#### SF-1 Dataset
+| Query | Execution Time (ms) |
+|-------|---------------------|
+| Q1    | 46                  |
+| Q3    | 28                  |
+| Q6    | 2                   |
+| Q9    | 113                 |
+| Q13   | 121                 |
+
+#### SF-10 Dataset
+| Query | Execution Time (ms) |
+|-------|---------------------|
+| Q1    | 229                 |
+| Q3    | 399                 |
+| Q6    | 23                  |
+| Q9    | 1114                |
+| Q13   | 1687                |
+
+## How to Run Benchmarks
 
 ### Prerequisites
-- macOS with Metal support
-- `brew install duckdb`
-
-### GPU Benchmark
 ```bash
-make run      # SF-10 dataset (60M rows)
-make run-sf1  # SF-1 dataset (6M rows)
+# Install DuckDB
+brew install duckdb
+
+# Install CedarDB via Docker
+docker pull cedardb/cedardb
 ```
 
-### DuckDB Comparison
+### Step 1: Build GPU Benchmark
 ```bash
-./benchmark_duckdb.sh
-./benchmark_gpu.sh
-python3 scripts/generate_combined_report.py
+make
 ```
+
+### Step 2: Run GPU Benchmark
+```bash
+# From GPUDBMentalBenchmark/GPUDBMentalBenchmark directory
+cd GPUDBMentalBenchmark
+../build/bin/GPUDBMentalBenchmark sf1   # For SF-1
+../build/bin/GPUDBMentalBenchmark sf10  # For SF-10
+```
+
+### Step 3: Run DuckDB Benchmark
+```bash
+# From project root
+./benchmark_duckdb.sh SF-1 SF-10
+```
+
+### Step 4: Start CedarDB and Run Benchmark
+```bash
+# Start CedarDB container
+docker run -d --name cedardb -p 5432:5432 -e CEDAR_PASSWORD=cedar --memory=12g cedardb/cedardb
+
+# Run benchmarks
+./benchmark_cedardb.sh SF-1
+./benchmark_cedardb.sh SF-10
+```
+
+### Step 5: View Results
+```bash
+# View CSV files
+cat benchmark_results/gpu_results.csv
+cat benchmark_results/duckdb_results.csv
+cat benchmark_results/cedardb_results.csv
+```
+
+## Benchmark Details
+
+- **TPC-H Queries**: Q1 (Pricing Summary), Q3 (Shipping Priority), Q6 (Revenue Forecasting), Q9 (Product Profit), Q13 (Customer Distribution)
+- **Data Format**: TPC-H standard `.tbl` files
+- **Cache Strategy**: Warm cache (data pre-loaded, queries run on hot cache)
+- **Timing Method**: Execution time only (excludes I/O and data loading)
 
 
 
