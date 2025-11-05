@@ -1,0 +1,177 @@
+--- Running Selection Benchmark ---
+Loaded 6001215 rows for selection.
+--- Filter Value: < 1000 ---
+Selectivity: 0.495916% (29761 rows matched)
+GPU execution time: 0.8755 ms
+Effective Bandwidth: 25.5354 GB/s
+
+--- Filter Value: < 10000 ---
+Selectivity: 4.99156% (299554 rows matched)
+GPU execution time: 0.914792 ms
+Effective Bandwidth: 24.4386 GB/s
+
+--- Filter Value: < 50000 ---
+Selectivity: 24.9919% (1499817 rows matched)
+GPU execution time: 0.957708 ms
+Effective Bandwidth: 23.3435 GB/s
+
+--- Running Aggregation Benchmark ---
+Loaded 6001215 rows for aggregation.
+Final SUM(l_quantity): 1.53079e+08
+GPU execution time: 1.32 ms
+Effective Bandwidth: 16.9366 GB/s
+
+--- Running Join Benchmark ---
+Loaded 1500000 rows from orders.tbl for build phase.
+Loaded 6001215 rows from lineitem.tbl for probe phase.
+Join complete. Found 6001215 total matches.
+Build Phase GPU time: 2.93238 ms
+Probe Phase GPU time: 10.2322 ms
+Total Join GPU time: 13.1646 ms
+
+--- Running TPC-H Query 1 Benchmark ---
+
++----------+----------+------------+----------------+----------------+----------------+------------+------------+------------+----------+
+| l_return | l_linest |    sum_qty | sum_base_price | sum_disc_price |     sum_charge |    avg_qty |  avg_price |   avg_disc | count    |
++----------+----------+------------+----------------+----------------+----------------+------------+------------+------------+----------+
+|        A |        F | 37734107.00 | 56586554906.22 | 53758257869.25 | 55909066097.75 |      25.52 |   38273.13 |       0.05 |  1478493 |
+|        N |        F |  991417.00 |  1487504723.82 |  1413082186.74 |  1469649245.58 |      25.52 |   38284.47 |       0.05 |    38854 |
+|        N |        O | 74476040.00 | 111701730693.68 | 106118231734.43 | 110367045582.60 |      25.50 |   38249.12 |       0.05 |  2920374 |
+|        R |        F | 37719753.00 | 56568041884.24 | 53741293405.63 | 55889619981.14 |      25.51 |   38250.85 |       0.05 |  1478870 |
++----------+----------+------------+----------------+----------------+----------------+------------+------------+------------+----------+
+Total TPC-H Q1 GPU time: 31.35 ms
+Q1 CPU time: 0.00 ms
+Total TPC-H Q1 wall-clock: 35.74 ms
+Total TPC-H Q1 end-to-end: 35.74 ms
+
+--- Running TPC-H Query 3 Benchmark ---
+Loaded 150000 customers, 1500000 orders, 6001215 lineitem rows.
+
+TPC-H Query 3 Results (Top 10):
++----------+------------+------------+--------------+
+| orderkey |   revenue  | orderdate  | shippriority |
++----------+------------+------------+--------------+
+|  2456423 | $ 406181.00 |   19950305 |            0 |
+|  3459808 | $ 405838.75 |   19950304 |            0 |
+|   492164 | $ 390324.09 |   19950219 |            0 |
+|  1188320 | $ 384537.94 |   19950309 |            0 |
+|  2435712 | $ 378673.09 |   19950226 |            0 |
+|  4878020 | $ 378376.78 |   19950312 |            0 |
+|  5521732 | $ 375153.91 |   19950313 |            0 |
+|  2628192 | $ 373133.31 |   19950222 |            0 |
+|   993600 | $ 371407.47 |   19950305 |            0 |
+|  2300070 | $ 367371.16 |   19950313 |            0 |
++----------+------------+------------+--------------+
+Total results found: 11620
+Q3 Mode: Hybrid (GPU probe + CPU merge)
+  GPU time (build+probe): 11.238 ms
+  CPU merge time: 1.225 ms
+Q3 CPU time: 1.22 ms
+  Total hybrid time: 12.463 ms
+Total TPC-H Q3 GPU time: 11.24 ms
+Total TPC-H Q3 wall-clock: 27.76 ms
+--- Running TPC-H Query 6 Benchmark ---
+Loaded 6001215 rows for TPC-H Query 6.
+TPC-H Query 6 Result:
+Total Revenue: $123141000.00
+Total TPC-H Q6 GPU time: 1.72 ms
+Q6 CPU time: 0.00 ms
+Total TPC-H Q6 wall-clock: 4.96 ms
+Effective Bandwidth: 18.03 GB/s
+
+
+--- Running TPC-H Query 9 Benchmark ---
+Loaded data for all tables.
+
+TPC-H Query 9 Results (Top 15):
++------------+------+---------------+
+| Nation     | Year |        Profit |
++------------+------+---------------+
+| ALGERIA    | 1998 | $  27136914.00 |
+| ALGERIA    | 1997 | $  48611792.00 |
+| ALGERIA    | 1996 | $  48285488.00 |
+| ALGERIA    | 1995 | $  44402236.00 |
+| ALGERIA    | 1994 | $  48693984.00 |
+| ALGERIA    | 1993 | $  46044208.00 |
+| ALGERIA    | 1992 | $  45636860.00 |
+| ARGENTINA  | 1998 | $  28341672.00 |
+| ARGENTINA  | 1997 | $  47144004.00 |
+| ARGENTINA  | 1996 | $  45255224.00 |
+| ARGENTINA  | 1995 | $  45631756.00 |
+| ARGENTINA  | 1994 | $  48268836.00 |
+| ARGENTINA  | 1993 | $  48605588.00 |
+| ARGENTINA  | 1992 | $  46654260.00 |
+| BRAZIL     | 1998 | $  26527736.00 |
++------------+------+---------------+
+Total results found: 175
+
+Comparable TPC-H Q9 (yearly sum_profit):
++--------+---------------+
+| o_year |   sum_profit  |
++--------+---------------+
+|   1992 | 1135066108.0000 |
+|   1993 | 1146578260.0000 |
+|   1994 | 1139981796.0000 |
+|   1995 | 1142787532.0000 |
+|   1996 | 1153142816.0000 |
+|   1997 | 1148153716.0000 |
+|   1998 | 674750828.0000 |
++--------+---------------+
+Total TPC-H Q9 GPU time: 30.22 ms
+Q9 CPU time: 0.02 ms
+Total TPC-H Q9 wall-clock: 38.93 ms
+
+--- Running TPC-H Query 13 Benchmark ---
+Loaded 1500000 orders and 150000 customers.
+
+TPC-H Query 13 Results (Comparable histogram):
++---------+----------+
+| c_count | custdist |
++---------+----------+
+|       0 |    50005 |
+|       9 |     6641 |
+|      10 |     6532 |
+|      11 |     6014 |
+|       8 |     5937 |
+|      12 |     5640 |
+|      13 |     5023 |
+|      19 |     4792 |
+|       7 |     4687 |
+|      17 |     4588 |
+|      18 |     4529 |
+|      20 |     4518 |
+|      15 |     4506 |
+|      14 |     4448 |
+|      16 |     4270 |
+|      21 |     4190 |
+|      22 |     3621 |
+|       6 |     3264 |
+|      23 |     3226 |
+|      24 |     2743 |
+|      25 |     2084 |
+|       5 |     1949 |
+|      26 |     1612 |
+|      27 |     1179 |
+|       4 |     1007 |
+|      28 |      893 |
+|      29 |      593 |
+|       3 |      415 |
+|      30 |      376 |
+|      31 |      227 |
+|      32 |      147 |
+|       2 |      134 |
+|      33 |       75 |
+|      34 |       50 |
+|      35 |       37 |
+|       1 |       17 |
+|      36 |       14 |
+|      38 |        5 |
+|      37 |        5 |
+|      40 |        4 |
+|      41 |        2 |
+|      39 |        1 |
++---------+----------+
+Total TPC-H Q13 GPU time: 32.74 ms
+Q13 CPU merge time: 1.87 ms
+Q13 CPU time: 1.87 ms
+Total TPC-H Q13 wall-clock: 41.99 ms

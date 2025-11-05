@@ -1,0 +1,45 @@
+=== GPU Metal Q9 Results ===
+Timestamp: 20251105_130558
+Scale Factor: SF-10
+Query: Q9
+
+--- Running TPC-H Query 9 Benchmark ---
+Loaded data for all tables.
+
+TPC-H Query 9 Results (Top 15):
++------------+------+---------------+
+| Nation     | Year |        Profit |
++------------+------+---------------+
+| ALGERIA    | 1998 | $ 204910832.00 |
+| ALGERIA    | 1997 | $ 376382272.00 |
+| ALGERIA    | 1996 | $ 369809952.00 |
+| ALGERIA    | 1995 | $ 375847072.00 |
+| ALGERIA    | 1994 | $ 373759872.00 |
+| ALGERIA    | 1993 | $ 373226560.00 |
+| ALGERIA    | 1992 | $ 378981792.00 |
+| ARGENTINA  | 1998 | $ 211087104.00 |
+| ARGENTINA  | 1997 | $ 386916960.00 |
+| ARGENTINA  | 1996 | $ 391570688.00 |
+| ARGENTINA  | 1995 | $ 389573504.00 |
+| ARGENTINA  | 1994 | $ 379864064.00 |
+| ARGENTINA  | 1993 | $ 387023808.00 |
+| ARGENTINA  | 1992 | $ 393852480.00 |
+| BRAZIL     | 1998 | $ 204344720.00 |
++------------+------+---------------+
+Total results found: 175
+
+Comparable TPC-H Q9 (yearly sum_profit):
++--------+---------------+
+| o_year |   sum_profit  |
++--------+---------------+
+|   1992 | 9634384864.0000 |
+|   1993 | 9573263360.0000 |
+|   1994 | 9603257536.0000 |
+|   1995 | 9568334976.0000 |
+|   1996 | 9603440480.0000 |
+|   1997 | 9589377408.0000 |
+|   1998 | 5154036560.0000 |
++--------+---------------+
+Total TPC-H Q9 GPU time: 398.22 ms
+Q9 CPU time: 0.14 ms
+Total TPC-H Q9 wall-clock: 588.69 ms

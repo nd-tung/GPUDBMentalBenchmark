@@ -1,0 +1,14 @@
+{
+	"version": "2.0.0",
+	"tasks": [
+		{
+			"label": "make build",
+			"type": "shell",
+			"command": "make -C /Users/tea/Documents/GPUDBMentalBenchmark build",
+			"problemMatcher": [
+				"$gcc"
+			],
+			"group": "build"
+		}
+	]
+}

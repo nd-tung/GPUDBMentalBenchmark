@@ -530,6 +530,9 @@ void runQ1Benchmark(MTL::Device* device, MTL::CommandQueue* commandQueue, MTL::L
     auto q1_e2e_end = std::chrono::high_resolution_clock::now();
     double q1_e2e_ms = std::chrono::duration<double, std::milli>(q1_e2e_end - q1_e2e_start).count();
 
+    // CPU post-processing (build final results) timing start
+    auto q1_cpu_post_start = std::chrono::high_resolution_clock::now();
+
     // Read back final results
     long* sum_qty_c = (long*)f_sumQtyCents->contents();
     long* sum_base_c = (long*)f_sumBaseCents->contents();
@@ -562,6 +565,9 @@ void runQ1Benchmark(MTL::Device* device, MTL::CommandQueue* commandQueue, MTL::L
     emit_bin(2,0,4); // R/F
     emit_bin(2,1,5); // R/O
 
+    auto q1_cpu_post_end = std::chrono::high_resolution_clock::now();
+    double q1_cpu_ms = std::chrono::duration<double, std::milli>(q1_cpu_post_end - q1_cpu_post_start).count();
+
     printf("\n+----------+----------+------------+----------------+----------------+----------------+------------+------------+------------+----------+\n");
     printf("| l_return | l_linest |    sum_qty | sum_base_price | sum_disc_price |     sum_charge |    avg_qty |  avg_price |   avg_disc | count    |\n");
     printf("+----------+----------+------------+----------------+----------------+----------------+------------+------------+------------+----------+\n");
@@ -573,6 +579,7 @@ void runQ1Benchmark(MTL::Device* device, MTL::CommandQueue* commandQueue, MTL::L
     printf("+----------+----------+------------+----------------+----------------+----------------+------------+------------+------------+----------+\n");
     // Standardized timing prints
     printf("Total TPC-H Q1 GPU time: %0.2f ms\n", q1_gpu_ms);
+    printf("Q1 CPU time: %0.2f ms\n", q1_cpu_ms);
     printf("Total TPC-H Q1 wall-clock: %0.2f ms\n", q1_wall_ms);
     // Also report e2e in case host prep differs
     printf("Total TPC-H Q1 end-to-end: %0.2f ms\n", q1_e2e_ms);
@@ -774,6 +781,8 @@ void runQ3Benchmark(MTL::Device* pDevice, MTL::CommandQueue* pCommandQueue, MTL:
     printf("Q3 Mode: Hybrid (GPU probe + CPU merge)\n");
     printf("  GPU time (build+probe): %0.3f ms\n", gpuExecutionTime * 1000.0);
     printf("  CPU merge time: %0.3f ms\n", cpuMergeMs);
+    // Standardized CPU time line for reporting
+    printf("Q3 CPU time: %0.2f ms\n", cpuMergeMs);
     printf("  Total hybrid time: %0.3f ms\n", gpuExecutionTime * 1000.0 + cpuMergeMs);
     // Standardized timing prints
     printf("Total TPC-H Q3 GPU time: %0.2f ms\n", gpuExecutionTime * 1000.0);
@@ -915,14 +924,21 @@ void runQ6Benchmark(MTL::Device* device, MTL::CommandQueue* commandQueue, MTL::L
     double q6_wall_s = std::chrono::duration<double>(q6_e2e_end - q6_e2e_start).count();
     double q6_gpu_s = commandBuffer->GPUEndTime() - commandBuffer->GPUStartTime();
 
+    // CPU post (minimal) timing: fetching result
+    auto q6_cpu_post_start = std::chrono::high_resolution_clock::now();
+
     // Get result
     float* resultData = (float*)finalRevenueBuffer->contents();
     float totalRevenue = resultData[0];
+
+    auto q6_cpu_post_end = std::chrono::high_resolution_clock::now();
+    double q6_cpu_ms = std::chrono::duration<double, std::milli>(q6_cpu_post_end - q6_cpu_post_start).count();
 
     std::cout << "TPC-H Query 6 Result:" << std::endl;
     std::cout << "Total Revenue: $" << std::fixed << std::setprecision(2) << totalRevenue << std::endl;
     // Standardized timing prints
     printf("Total TPC-H Q6 GPU time: %0.2f ms\n", q6_gpu_s * 1000.0);
+    printf("Q6 CPU time: %0.2f ms\n", q6_cpu_ms);
     printf("Total TPC-H Q6 wall-clock: %0.2f ms\n", q6_wall_s * 1000.0);
     
     // Calculate effective bandwidth (rough estimate)
@@ -1108,7 +1124,8 @@ void runQ9Benchmark(MTL::Device* pDevice, MTL::CommandQueue* pCommandQueue, MTL:
     double q9_e2e_time = std::chrono::duration<double>(q9_e2e_end - q9_e2e_start).count();
     double q9_gpu_compute_time = pCommandBuffer->GPUEndTime() - pCommandBuffer->GPUStartTime();
 
-    // 6. Process and print final results
+    // 6. CPU post-processing: read, aggregate, and sort results
+    auto q9_cpu_post_start = std::chrono::high_resolution_clock::now();
     Q9Aggregates_CPU* results = (Q9Aggregates_CPU*)pFinalHTBuffer->contents();
     std::vector<Q9Result> final_results;
     for (uint i = 0; i < final_ht_size; ++i) {
@@ -1122,6 +1139,7 @@ void runQ9Benchmark(MTL::Device* pDevice, MTL::CommandQueue* pCommandQueue, MTL:
         if (a.nationkey != b.nationkey) return a.nationkey < b.nationkey;
         return a.year > b.year;
     });
+    auto q9_cpu_post_mid = std::chrono::high_resolution_clock::now();
 
     printf("\nTPC-H Query 9 Results (Top 15):\n");
     printf("+------------+------+---------------+\n");
@@ -1146,7 +1164,10 @@ void runQ9Benchmark(MTL::Device* pDevice, MTL::CommandQueue* pCommandQueue, MTL:
         printf("| %6d | %13.4f |\n", kv.first, kv.second);
     }
     printf("+--------+---------------+\n");
+    auto q9_cpu_post_end = std::chrono::high_resolution_clock::now();
+    double q9_cpu_ms = std::chrono::duration<double, std::milli>(q9_cpu_post_end - q9_cpu_post_start).count();
     printf("Total TPC-H Q9 GPU time: %0.2f ms\n", q9_gpu_compute_time * 1000.0);
+    printf("Q9 CPU time: %0.2f ms\n", q9_cpu_ms);
     printf("Total TPC-H Q9 wall-clock: %0.2f ms\n", q9_e2e_time * 1000.0);
     
     // Release all functions and pipelines
@@ -1312,6 +1333,8 @@ void runQ13Benchmark(MTL::Device* pDevice, MTL::CommandQueue* pCommandQueue, MTL
     printf("+---------+----------+\n");
     printf("Total TPC-H Q13 GPU time: %0.2f ms\n", gpuExecutionTime * 1000.0);
     printf("Q13 CPU merge time: %0.2f ms\n", q13_cpu_merge_time * 1000.0);
+    // Standardized CPU time line for reporting
+    printf("Q13 CPU time: %0.2f ms\n", q13_cpu_merge_time * 1000.0);
     printf("Total TPC-H Q13 wall-clock: %0.2f ms\n", q13_e2e_time * 1000.0);
 
     // Release objects...

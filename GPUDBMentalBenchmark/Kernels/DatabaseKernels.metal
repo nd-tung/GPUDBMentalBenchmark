@@ -694,27 +694,28 @@ kernel void q1_bins_accumulate_int_stage1(
     // Grid stride loop using actual dispatched num_threadgroups
     uint grid_size = threads_per_group * num_threadgroups;
     for (uint i = (group_id * threads_per_group) + thread_id_in_group; i < data_size; i += grid_size) {
+        // [SEL] Selection: filter rows by shipdate and bin by (returnflag, linestatus)
         if (l_shipdate[i] > cutoff_date) continue;
         int rfi = q1_rf_index(l_returnflag[i]); if (rfi < 0) continue;
         int lsi = q1_ls_index(l_linestatus[i]); if (lsi < 0) continue;
         int bin = rfi * 2 + lsi; // 0..5
 
-        // Convert to integer units with half-up rounding (data are non-negative)
+        // [PROJ] Projection: convert to fixed-point (cents for currency, basis points for percentages)
         float base = l_extendedprice[i];
         float qty  = l_quantity[i];
         float d    = l_discount[i];
         float t    = l_tax[i];
 
-        long base_c = (long)floor(base * 100.0f + 0.5f);
-        long qty_c  = (long)floor(qty  * 100.0f + 0.5f);
-        int  d_bp   = (int)floor(d * 100.0f + 0.5f);   // basis points of discount percentage
-        int  t_bp   = (int)floor(t * 100.0f + 0.5f);   // basis points of tax percentage
+        long base_c = (long)floor(base * 100.0f + 0.5f);  // cents (int64)
+        long qty_c  = (long)floor(qty  * 100.0f + 0.5f);  // cents (int64)
+        int  d_bp   = (int)floor(d * 100.0f + 0.5f);      // basis points (int)
+        int  t_bp   = (int)floor(t * 100.0f + 0.5f);      // basis points (int)
 
-        // disc_price_cents = round_to_cents(base_cents * (100 - d_bp) / 100)
-        long disc_c = (base_c * (long)(100 - d_bp) + 50) / 100;
-        // charge_cents = round_to_cents(disc_cents * (100 + t_bp) / 100)
-        long charge_c = (disc_c * (long)(100 + t_bp) + 50) / 100;
+        // Compute derived columns in fixed-point
+        long disc_c = (base_c * (long)(100 - d_bp) + 50) / 100;  // disc_price_cents
+        long charge_c = (disc_c * (long)(100 + t_bp) + 50) / 100; // charge_cents
 
+        // [AGG-LOCAL] Local accumulation: per-thread accumulators (6 bins, no atomics)
         sum_qty_c[bin]      += qty_c;
         sum_base_c[bin]     += base_c;
         sum_disc_c[bin]     += disc_c;
@@ -727,15 +728,16 @@ kernel void q1_bins_accumulate_int_stage1(
     threadgroup long tg64[1024];
     threadgroup uint tg32[1024];
 
+    // [AGG-LOCAL] Threadgroup reduction for each bin and metric (power-of-two fold + tail handling)
     // For each bin, reduce each metric across threads, then write one partial per bin
     for (int b = 0; b < BINS; ++b) {
-        // qty_cents
+        // qty_cents (int64)
         tg64[thread_id_in_group] = sum_qty_c[b];
         threadgroup_barrier(mem_flags::mem_threadgroup);
         {
             uint n = threads_per_group;
-            uint p2 = 1u << (31 - clz(n));
-            uint tail = n - p2;
+            uint p2 = 1u << (31 - clz(n));  // largest power of 2 <= n
+            uint tail = n - p2;             // remainder elements
             if (thread_id_in_group < tail) {
                 tg64[thread_id_in_group] += tg64[thread_id_in_group + p2];
             }
@@ -862,7 +864,7 @@ kernel void q1_bins_reduce_int_stage2(
     constant uint& num_threadgroups,
     uint index [[thread_position_in_grid]])
 {
-    // Use a single thread to perform small reductions per bin
+    // [AGG-MERGE] Global reduction: single-thread final reduce over all threadgroups
     if (index != 0) return;
     const uint BINS = 6;
     for (uint b = 0; b < BINS; ++b) {
