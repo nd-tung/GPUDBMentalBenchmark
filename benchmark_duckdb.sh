@@ -30,7 +30,7 @@ print_header() {
     echo -e "${YELLOW}--- $1 ---${NC}"
 }
 
-# Function to execute DuckDB command with proper timing (exec-only and wall-clock)
+# Function to execute DuckDB command with DuckDB internal profiler timing only
 execute_sql() {
     local description="$1"
     local sql_command="$2"
@@ -38,14 +38,8 @@ execute_sql() {
 
     echo -e "${GREEN}$description${NC}"
 
-    # Use DuckDB JSON profiling to capture exec-only; write to temp file to avoid parsing stdout
+    # Use DuckDB JSON profiling to capture exec-only timing
     local PROF_FILE="/tmp/duckdb_profile_${TIMESTAMP}_$$.json"
-
-    # Wall-clock around the DuckDB call
-    local start_ms=$(python3 - <<'PY'
-import time; print(int(time.time()*1000))
-PY
-)
 
     # Run query with profiling enabled; results printed to stdout; profiling JSON to file
     local cmd_output
@@ -56,19 +50,12 @@ $sql_command;
 EOF
 )
 
-    local end_ms=$(python3 - <<'PY'
-import time; print(int(time.time()*1000))
-PY
-)
-
-    local wall_ms=$((end_ms - start_ms))
-
-    # Extract exec-only timing from JSON (seconds -> ms); fallback to wall_ms if jq missing or parse fails
+    # Extract exec-only timing from JSON (seconds -> ms)
     local exec_ms=""
     if command -v jq >/dev/null 2>&1 && [[ -s "$PROF_FILE" ]]; then
-        # Pick the last available timing value in the profile, which corresponds to the query
+        # Extract latency from DuckDB profiler JSON (total execution time)
         local secs
-        secs=$(jq -r '..|.timing? // empty' "$PROF_FILE" | tail -n1)
+        secs=$(jq -r '.latency // empty' "$PROF_FILE")
         if [[ -n "$secs" && "$secs" != "null" ]]; then
             exec_ms=$(python3 - <<PY
 secs = float("$secs")
@@ -78,13 +65,16 @@ PY
         fi
     fi
     rm -f "$PROF_FILE" >/dev/null 2>&1 || true
+    
     if [[ -z "$exec_ms" ]]; then
-        exec_ms="$wall_ms"
+        echo -e "${RED}Error: Could not extract timing from DuckDB profiler${NC}"
+        echo -e "${RED}Make sure 'jq' is installed: brew install jq${NC}"
+        exit 1
     fi
 
-    echo "Exec-only (DuckDB profiler): ${exec_ms} ms"
+    echo "  ✓ Execution time: ${exec_ms} ms"
 
-    # Log results: timestamp,scale_factor,benchmark,exec_ms (no preview to avoid artifacts)
+    # Log results: timestamp,scale_factor,benchmark,exec_ms
     echo "$TIMESTAMP,$scale_factor,$description,$exec_ms" >> "$RESULTS_DIR/duckdb_results.csv"
 }
 
@@ -106,10 +96,12 @@ check_python() {
     echo -e "${GREEN}Python3 found for timing${NC}"
 }
 
-# Optional: check for jq for JSON parsing (falls back gracefully if missing)
+# Check for jq for JSON parsing (required for DuckDB profiler)
 check_jq() {
     if ! command -v jq &> /dev/null; then
-        echo -e "${YELLOW}Warning: 'jq' not found. Using wall-clock as exec-only fallback.${NC}"
+        echo -e "${RED}Error: 'jq' is required for DuckDB profiling.${NC}"
+        echo -e "${RED}Install with: brew install jq${NC}"
+        exit 1
     else
         echo -e "${GREEN}jq found for profiling JSON parsing${NC}"
     fi
@@ -370,7 +362,7 @@ run_benchmarks() {
     load_data "$scale_factor"
     
     # 4. TPC-H Query 1 Benchmark
-    print_header "TPC-H Query 1 Benchmark ($scale_factor) - In Memory"
+    print_header "TPC-H Query 1 Benchmark ($scale_factor)"
     
     execute_sql "Q1" \
         "SELECT
@@ -391,7 +383,7 @@ run_benchmarks() {
         "$scale_factor"
     
     # 5. TPC-H Query 3 Benchmark (Shipping Priority Query)
-    print_header "TPC-H Query 3 Benchmark ($scale_factor) - In Memory"
+    print_header "TPC-H Query 3 Benchmark ($scale_factor)"
     
     execute_sql "Q3" \
         "SELECT
@@ -411,7 +403,7 @@ run_benchmarks() {
         "$scale_factor"
     
     # 6. TPC-H Query 6 Benchmark (Forecasting Revenue Change Query)
-    print_header "TPC-H Query 6 Benchmark ($scale_factor) - In Memory"
+    print_header "TPC-H Query 6 Benchmark ($scale_factor)"
     
     execute_sql "Q6" \
         "SELECT
@@ -423,8 +415,8 @@ run_benchmarks() {
           AND l_quantity < 24;" \
         "$scale_factor"
     
-    # 7. TPC-H Query 9 Benchmark (Standard) - Product Type Profit Measure
-    print_header "TPC-H Query 9 Benchmark ($scale_factor) - Standard"
+    # 7. TPC-H Query 9 Benchmark - Product Type Profit Measure
+    print_header "TPC-H Query 9 Benchmark ($scale_factor)"
     
     execute_sql "Q9" \
         "SELECT 
@@ -444,7 +436,7 @@ run_benchmarks() {
         "$scale_factor"
     
     # 8. TPC-H Query 13 Benchmark (Customer Distribution Query)
-    print_header "TPC-H Query 13 Benchmark ($scale_factor) - In Memory"
+    print_header "TPC-H Query 13 Benchmark ($scale_factor)"
     
     execute_sql "Q13" \
         "SELECT
@@ -463,8 +455,6 @@ run_benchmarks() {
         GROUP BY c_count
         ORDER BY custdist DESC, c_count DESC;" \
         "$scale_factor"
-}
-
 }
 
 # Cleanup function

@@ -37,25 +37,51 @@ if ! command -v duckdb &> /dev/null; then
     exit 1
 fi
 
+# Check if jq is installed (required for DuckDB profiler)
+if ! command -v jq &> /dev/null; then
+    echo "Error: 'jq' is required for DuckDB profiling."
+    echo "Install with: brew install jq"
+    exit 1
+fi
+
 echo "DuckDB found: $(duckdb --version)"
+echo "jq found for profiling JSON parsing"
 echo ""
 
-# Function to run a query, extract timing, and save results
+# Function to run a query, extract DuckDB internal timing, and save results
 run_query_with_results() {
     local query_name=$1
     local query_sql=$2
     local log_file="${LOG_DIR}/${TIMESTAMP}/${SCALE_FACTOR}_${query_name}.log"
+    local prof_file="/tmp/duckdb_profile_${TIMESTAMP}_${query_name}.json"
     
     echo "Running ${query_name}..."
     
-    # Measure wall-clock time using Python
-    local start_ms=$(python3 -c "import time; print(int(time.time()*1000))")
+    # Run query with DuckDB profiling enabled
+    local output
+    output=$(duckdb "$DB_FILE" << EOF 2>&1
+PRAGMA enable_profiling='json';
+PRAGMA profiling_output='$prof_file';
+$query_sql;
+EOF
+)
     
-    # Run query and capture output
-    local output=$(duckdb "$DB_FILE" -c "$query_sql" 2>&1)
+    # Extract timing from DuckDB profiler JSON
+    local exec_time=""
+    if command -v jq >/dev/null 2>&1 && [[ -s "$prof_file" ]]; then
+        local secs
+        secs=$(jq -r '.latency // empty' "$prof_file")
+        if [[ -n "$secs" && "$secs" != "null" ]]; then
+            exec_time=$(python3 -c "print(int(float('$secs') * 1000))")
+        fi
+    fi
+    rm -f "$prof_file" >/dev/null 2>&1 || true
     
-    local end_ms=$(python3 -c "import time; print(int(time.time()*1000))")
-    local exec_time=$((end_ms - start_ms))
+    if [[ -z "$exec_time" ]]; then
+        echo "  ⚠️  Warning: Could not extract DuckDB profiler timing for ${query_name}"
+        echo "  Make sure 'jq' is installed: brew install jq"
+        exec_time="0"
+    fi
     
     # Save full output to log file
     echo "=== DuckDB ${query_name} Results ===" > "${log_file}"
