@@ -274,38 +274,45 @@ static void runEngineSQL(const std::string& sql) {
         
         // Check if GPU can handle this query
         bool gpuEligible = false;
-        if (want_gpu && aggFunc == "sum") {
-            if (hasExpression) {
+        std::string lowerAggFunc = aggFunc;
+        std::transform(lowerAggFunc.begin(), lowerAggFunc.end(), lowerAggFunc.begin(), ::tolower);
+        
+        if (want_gpu) {
+            if (lowerAggFunc == "sum" && hasExpression) {
                 // Expression path (e.g., l_extendedprice * (1 - l_discount))
                 gpuEligible = true;
-            } else if (!targetIdent.empty()) {
-                // Simple column path
-                gpuEligible = engine::GpuExecutor::isEligible(aggFunc, clauses, targetIdent);
+            } else if (!targetIdent.empty() && (lowerAggFunc == "sum" || lowerAggFunc == "count" || 
+                       lowerAggFunc == "avg" || lowerAggFunc == "min" || lowerAggFunc == "max")) {
+                // Simple column aggregation
+                gpuEligible = engine::GpuExecutor::isEligible(lowerAggFunc, clauses, targetIdent);
             }
         }
         
         if (gpuEligible) {
             engine::GPUResult gpuRes;
-            if (hasExpression) {
+            if (lowerAggFunc == "sum" && hasExpression) {
                 gpuRes = engine::GpuExecutor::runSumWithExpression(g_dataset_path, aggExpr, clauses);
-            } else {
+            } else if (lowerAggFunc == "sum") {
                 gpuRes = engine::GpuExecutor::runSum(g_dataset_path, targetIdent, clauses);
+            } else {
+                gpuRes = engine::GpuExecutor::runAggregate(g_dataset_path, lowerAggFunc, targetIdent, clauses);
             }
+            
             std::cout << "Result:" << std::endl;
-            std::cout << "Scalar SUM (GPU): " << std::fixed << std::setprecision(2) << gpuRes.revenue << std::endl;
+            std::string aggLabel = lowerAggFunc;
+            std::transform(aggLabel.begin(), aggLabel.end(), aggLabel.begin(), ::toupper);
+            std::cout << "Scalar " << aggLabel << ": " << std::fixed << std::setprecision(2) << gpuRes.revenue << std::endl;
+            if (lowerAggFunc == "count" || lowerAggFunc == "avg") {
+                std::cout << "Row count: " << gpuRes.count << std::endl;
+            }
             printf("Upload time: %0.2f ms\n", gpuRes.upload_ms);
             printf("GPU kernel time: %0.2f ms\n", gpuRes.gpu_ms);
-            // CPU reference for validation
-            auto cpuRes = engine::Executor::runGeneric(plan, g_dataset_path);
-            std::cout << "Scalar SUM (CPU): " << std::fixed << std::setprecision(2) << cpuRes.revenue << std::endl;
-            printf("CPU reference time: %0.2f ms\n", cpuRes.cpu_ms);
-            double diff = std::abs(cpuRes.revenue - gpuRes.revenue);
-            double rel = diff / (std::abs(cpuRes.revenue)+1e-9);
-            printf("Rel diff: %.6f\n", rel);
         } else {
             auto result = engine::Executor::runGeneric(plan, g_dataset_path);
             std::cout << "Result:" << std::endl;
-            std::cout << "Scalar SUM: " << std::fixed << std::setprecision(2) << result.revenue << std::endl;
+            std::string aggLabel = lowerAggFunc;
+            std::transform(aggLabel.begin(), aggLabel.end(), aggLabel.begin(), ::toupper);
+            std::cout << "Scalar " << aggLabel << ": " << std::fixed << std::setprecision(2) << result.revenue << std::endl;
             printf("CPU time: %0.2f ms\n", result.cpu_ms);
         }
     }

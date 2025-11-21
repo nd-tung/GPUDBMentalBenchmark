@@ -1,6 +1,7 @@
 #include "GpuExecutor.hpp"
 #include "ColumnStoreGPU.hpp"
 #include "Expression.hpp"
+#include "Predicate.hpp"
 #include <fstream>
 #include <string>
 #include <vector>
@@ -43,8 +44,8 @@ bool GpuExecutor::isEligible(const std::string& aggFunc,
                              const std::vector<expr::Clause>& clauses,
                              const std::string& targetColumn) {
     std::string f = aggFunc; std::transform(f.begin(), f.end(), f.begin(), ::tolower);
-    if (f != "sum") return false;
-    if (targetColumn.empty()) return false;
+    if (f != "sum" && f != "count" && f != "avg" && f != "min" && f != "max") return false;
+    if (targetColumn.empty() && f != "count") return false;  // COUNT(*) is ok
     if (clauses.size() > 32) return false;
     return true;
 }
@@ -55,6 +56,14 @@ struct PredicateClausePacked {
     uint32_t op;       // 0..4
     uint32_t isDate;   // 0 numeric, 1 date
     int64_t value;     // lower 32 bits store float literal bits
+};
+
+// Multi-column predicate clause for scan_filter_aggregate kernel
+struct PredicateClause {
+    uint32_t colIndex;
+    uint32_t op;
+    uint32_t isDate;
+    int64_t value;
 };
 
 GPUResult GpuExecutor::runSum(const std::string& dataset_path,
@@ -215,7 +224,7 @@ GPUResult GpuExecutor::runSum(const std::string& dataset_path,
     predicateBuffer->release();
     outSumBuffer->release();
 
-    return {revenue, gpu_ms, upload_ms};
+    return {revenue, gpu_ms, upload_ms, 0};
 }
 
 // New kernel for expression evaluation
@@ -405,7 +414,204 @@ GPUResult GpuExecutor::runSumWithExpression(const std::string& dataset_path,
     exprBuffer->release();
     outSumBuffer->release();
     
-    return {revenue, gpu_ms, upload_ms};
+    return {revenue, gpu_ms, upload_ms, 0};
+}
+
+GPUResult GpuExecutor::runAggregate(const std::string& dataset_path,
+                                    const std::string& aggFunc,
+                                    const std::string& targetColumn,
+                                    const std::vector<expr::Clause>& clauses) {
+    // Map aggregation function to type: COUNT=0, SUM=1, AVG=2, MIN=3, MAX=4
+    uint32_t aggType;
+    std::string lowerFunc = aggFunc;
+    std::transform(lowerFunc.begin(), lowerFunc.end(), lowerFunc.begin(), ::tolower);
+    
+    if (lowerFunc == "count") aggType = 0;
+    else if (lowerFunc == "sum") aggType = 1;
+    else if (lowerFunc == "avg") aggType = 2;
+    else if (lowerFunc == "min") aggType = 3;
+    else if (lowerFunc == "max") aggType = 4;
+    else return {0.0, 0.0, 0.0, 0};
+    
+    // Column schema
+    static const std::map<std::string, int> lineitem_schema = {
+        {"l_orderkey", 0}, {"l_partkey", 1}, {"l_suppkey", 2}, {"l_linenumber", 3},
+        {"l_quantity", 4}, {"l_extendedprice", 5}, {"l_discount", 6}, {"l_tax", 7},
+        {"l_returnflag", 8}, {"l_linestatus", 9}, {"l_shipdate", 10}, {"l_commitdate", 11},
+        {"l_receiptdate", 12}, {"l_shipinstruct", 13}, {"l_shipmode", 14}, {"l_comment", 15}
+    };
+    
+    auto uploadStart = std::chrono::high_resolution_clock::now();
+    
+    // Load target column (for COUNT, any column works, use first one)
+    std::string filePath = dataset_path + "lineitem.tbl";
+    int targetIdx = (aggType == 0 && targetColumn == "*") ? 4 : lineitem_schema.at(targetColumn);
+    std::vector<float> targetData = loadFloatColumn(filePath, targetIdx);
+    if (targetData.empty()) return {0.0, 0.0, 0.0, 0};
+    
+    uint32_t rowCount = static_cast<uint32_t>(targetData.size());
+    
+    // Load columns referenced in predicates
+    std::vector<std::string> predicateColumns;
+    for (const auto& cl : clauses) {
+        if (std::find(predicateColumns.begin(), predicateColumns.end(), cl.ident) == predicateColumns.end()) {
+            predicateColumns.push_back(cl.ident);
+        }
+    }
+    
+    // GPU setup
+    auto& store = ColumnStoreGPU::instance();
+    auto* targetCol = store.stageFloatColumn("__target", targetData);
+    if (!targetCol) return {0.0, 0.0, 0.0, 0};
+    
+    std::vector<GPUColumn*> predColumns;
+    for (const auto& col : predicateColumns) {
+        auto it = lineitem_schema.find(col);
+        if (it == lineitem_schema.end()) continue;
+        
+        std::vector<float> colData;
+        if (col == "l_shipdate" || col == "l_commitdate" || col == "l_receiptdate") {
+            colData = loadDateColumnAsFloat(filePath, it->second);
+        } else {
+            colData = loadFloatColumn(filePath, it->second);
+        }
+        auto* gpuCol = store.stageFloatColumn("__pred" + std::to_string(predColumns.size()), colData);
+        if (gpuCol) predColumns.push_back(gpuCol);
+    }
+    
+    // Build predicate buffer
+    std::vector<PredicateClause> packed;
+    std::map<std::string, uint32_t> colMap;
+    colMap["__target"] = 0;
+    for (size_t i = 0; i < predicateColumns.size(); ++i) {
+        colMap[predicateColumns[i]] = static_cast<uint32_t>(i + 1);
+    }
+    
+    for (const auto& cl : clauses) {
+        PredicateClause pc;
+        pc.colIndex = colMap[cl.ident];
+        pc.op = static_cast<uint32_t>(cl.op);
+        pc.isDate = cl.isDate ? 1u : 0u;
+        
+        if (pc.isDate) {
+            pc.value = cl.date;
+        } else {
+            union { uint32_t u; float f; } conv;
+            conv.f = static_cast<float>(cl.num);
+            pc.value = conv.u;
+        }
+        packed.push_back(pc);
+    }
+    
+    uint32_t colCount = static_cast<uint32_t>(predColumns.size() + 1);
+    uint32_t clauseCount = static_cast<uint32_t>(packed.size());
+    
+    auto uploadEnd = std::chrono::high_resolution_clock::now();
+    double upload_ms = std::chrono::duration<double, std::milli>(uploadEnd - uploadStart).count();
+    
+    // Create buffers
+    MTL::Buffer* predicateBuffer = packed.empty() 
+        ? store.device()->newBuffer(sizeof(PredicateClause), MTL::ResourceStorageModeShared)
+        : store.device()->newBuffer(packed.data(), packed.size() * sizeof(PredicateClause), MTL::ResourceStorageModeShared);
+    
+    MTL::Buffer* outResultBuffer = store.device()->newBuffer(sizeof(uint32_t), MTL::ResourceStorageModeShared);
+    MTL::Buffer* outCountBuffer = store.device()->newBuffer(sizeof(uint32_t), MTL::ResourceStorageModeShared);
+    
+    // Initialize output buffers
+    if (aggType == 3) {
+        // MIN: initialize to max float
+        union { uint32_t u; float f; } conv;
+        conv.f = FLT_MAX;
+        *reinterpret_cast<uint32_t*>(outResultBuffer->contents()) = conv.u;
+    } else if (aggType == 4) {
+        // MAX: initialize to min float
+        union { uint32_t u; float f; } conv;
+        conv.f = -FLT_MAX;
+        *reinterpret_cast<uint32_t*>(outResultBuffer->contents()) = conv.u;
+    } else {
+        *reinterpret_cast<uint32_t*>(outResultBuffer->contents()) = 0;
+    }
+    *reinterpret_cast<uint32_t*>(outCountBuffer->contents()) = 0;
+    
+    // Get kernel
+    static MTL::ComputePipelineState* pipeline = nullptr;
+    if (!pipeline) {
+        NS::Error* error = nullptr;
+        auto fnName = NS::String::string("ops::scan_filter_aggregate", NS::UTF8StringEncoding);
+        MTL::Function* fn = store.library()->newFunction(fnName);
+        if (!fn) {
+            std::cerr << "[GPU] Kernel ops::scan_filter_aggregate not found" << std::endl;
+            fnName->release();
+            predicateBuffer->release();
+            outResultBuffer->release();
+            outCountBuffer->release();
+            return {0.0, 0.0, upload_ms, 0};
+        }
+        pipeline = store.device()->newComputePipelineState(fn, &error);
+        fn->release();
+        fnName->release();
+        if (!pipeline) {
+            if (error) std::cerr << "[GPU] Pipeline error: " << error->localizedDescription()->utf8String() << std::endl;
+            predicateBuffer->release();
+            outResultBuffer->release();
+            outCountBuffer->release();
+            return {0.0, 0.0, upload_ms, 0};
+        }
+    }
+    
+    // Execute
+    auto kernelStart = std::chrono::high_resolution_clock::now();
+    MTL::CommandBuffer* cmd = store.queue()->commandBuffer();
+    MTL::ComputeCommandEncoder* enc = cmd->computeCommandEncoder();
+    enc->setComputePipelineState(pipeline);
+    
+    // Bind column buffers
+    enc->setBuffer(targetCol->buffer, 0, 0);
+    for (size_t i = 0; i < predColumns.size(); ++i) {
+        enc->setBuffer(predColumns[i]->buffer, 0, static_cast<NS::UInteger>(i + 1));
+    }
+    
+    // Bind parameters
+    enc->setBuffer(predicateBuffer, 0, 8);
+    enc->setBytes(&colCount, sizeof(colCount), 9);
+    enc->setBytes(&clauseCount, sizeof(clauseCount), 10);
+    enc->setBytes(&rowCount, sizeof(rowCount), 11);
+    enc->setBytes(&aggType, sizeof(aggType), 12);
+    enc->setBuffer(outResultBuffer, 0, 13);
+    enc->setBuffer(outCountBuffer, 0, 14);
+    
+    NS::UInteger maxTG = pipeline->maxTotalThreadsPerThreadgroup();
+    if (maxTG > rowCount) maxTG = rowCount;
+    MTL::Size gridSize = MTL::Size::Make(rowCount, 1, 1);
+    MTL::Size tgSize = MTL::Size::Make(maxTG, 1, 1);
+    enc->dispatchThreads(gridSize, tgSize);
+    enc->endEncoding();
+    cmd->commit();
+    cmd->waitUntilCompleted();
+    
+    auto kernelEnd = std::chrono::high_resolution_clock::now();
+    double gpu_ms = (cmd->GPUEndTime() - cmd->GPUStartTime()) * 1000.0;
+    if (gpu_ms <= 0.0) gpu_ms = std::chrono::duration<double, std::milli>(kernelEnd - kernelStart).count();
+    
+    // Read results
+    uint32_t resultBits = *reinterpret_cast<uint32_t*>(outResultBuffer->contents());
+    uint32_t count = *reinterpret_cast<uint32_t*>(outCountBuffer->contents());
+    
+    union { uint32_t u; float f; } conv;
+    conv.u = resultBits;
+    double result = static_cast<double>(conv.f);
+    
+    // For AVG, divide sum by count
+    if (aggType == 2 && count > 0) {
+        result = result / count;
+    }
+    
+    // Release buffers
+    predicateBuffer->release();
+    outResultBuffer->release();
+    outCountBuffer->release();
+    
+    return {result, gpu_ms, upload_ms, count};
 }
 
 } // namespace engine

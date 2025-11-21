@@ -186,10 +186,14 @@ Plan Planner::fromSQL(const std::string& sql) {
             IRNode s; s.type = IRNode::Type::Scan; s.scan.table = table; p.nodes.push_back(s);
         }
         
-        // Fallback minimal regex extraction with nested parentheses handling
-        std::regex re_sum(R"(select\s+sum\s*\()", std::regex::icase);
+        // Parse aggregation function: SUM, COUNT, AVG, MIN, MAX
+        std::string aggFunc;
+        std::regex re_agg(R"(select\s+(sum|count|avg|min|max)\s*\()", std::regex::icase);
         std::smatch m;
-        if (std::regex_search(sql, m, re_sum)) {
+        if (std::regex_search(sql, m, re_agg)) {
+            aggFunc = m[1].str();
+            std::transform(aggFunc.begin(), aggFunc.end(), aggFunc.begin(), ::tolower);
+            
             // Find matching closing parenthesis
             size_t start = m.position() + m.length();
             int depth = 1;
@@ -254,14 +258,14 @@ Plan Planner::fromSQL(const std::string& sql) {
             p.nodes.push_back(l);
         }
         
-        // Only add aggregate if SUM is present AND no GROUP BY
-        if (!aggexpr.empty()) {
+        // Only add aggregate if aggregation function is present AND no GROUP BY
+        if (!aggexpr.empty() && !aggFunc.empty()) {
             bool hasGroupBy = false;
             for (auto& n : p.nodes) if (n.type == IRNode::Type::GroupBy) hasGroupBy = true;
             
             if (!hasGroupBy) {
                 if (!predicate.empty()) { IRNode f; f.type = IRNode::Type::Filter; f.filter.predicate = predicate; p.nodes.push_back(f); }
-                IRNode a; a.type = IRNode::Type::Aggregate; a.aggregate.func = "sum"; a.aggregate.expr = aggexpr;
+                IRNode a; a.type = IRNode::Type::Aggregate; a.aggregate.func = aggFunc; a.aggregate.expr = aggexpr;
                 // Check if expression contains arithmetic operators
                 a.aggregate.hasExpression = (aggexpr.find('*') != std::string::npos || 
                                              aggexpr.find('/') != std::string::npos ||

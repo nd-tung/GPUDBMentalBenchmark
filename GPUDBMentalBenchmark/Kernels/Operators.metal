@@ -469,4 +469,146 @@ kernel void hash_join_probe(const device uint* probe_keys [[buffer(0)]],
     output_payloads[gid] = 0;
 }
 
+// Generic aggregation kernel supporting COUNT, SUM, AVG, MIN, MAX
+// aggType: 0=COUNT, 1=SUM, 2=AVG, 3=MIN, 4=MAX
+kernel void scan_filter_aggregate(const device float* col0 [[buffer(0)]],
+                                  const device float* col1 [[buffer(1)]],
+                                  const device float* col2 [[buffer(2)]],
+                                  const device float* col3 [[buffer(3)]],
+                                  const device float* col4 [[buffer(4)]],
+                                  const device float* col5 [[buffer(5)]],
+                                  const device float* col6 [[buffer(6)]],
+                                  const device float* col7 [[buffer(7)]],
+                                  constant PredicateClause* clauses [[buffer(8)]],
+                                  constant uint& col_count [[buffer(9)]],
+                                  constant uint& clause_count [[buffer(10)]],
+                                  constant uint& row_count [[buffer(11)]],
+                                  constant uint& aggType [[buffer(12)]],
+                                  device atomic_uint* out_result_bits [[buffer(13)]],
+                                  device atomic_uint* out_count [[buffer(14)]],
+                                  uint gid [[thread_position_in_grid]],
+                                  uint tid [[thread_index_in_threadgroup]],
+                                  uint tgSize [[threads_per_threadgroup]]) {
+    if (gid >= row_count) return;
+    if (tgSize > 1024) tgSize = 1024;
+    
+    threadgroup float localVals[1024];
+    threadgroup uint localCounts[1024];
+    
+    const device float* cols[8] = {col0, col1, col2, col3, col4, col5, col6, col7};
+    float target_val = cols[0][gid];
+    
+    // Evaluate predicates
+    bool passes = true;
+    for (uint c = 0; c < clause_count && passes; ++c) {
+        PredicateClause pc = clauses[c];
+        if (pc.colIndex >= col_count) { passes = false; break; }
+        float col_val = cols[pc.colIndex][gid];
+        
+        if (pc.isDate) {
+            int date_val = as_type<int>(col_val);
+            int date_lit = (int)(pc.value & 0xFFFFFFFFull);
+            switch (pc.op) {
+                case 0: passes = date_val < date_lit; break;
+                case 1: passes = date_val <= date_lit; break;
+                case 2: passes = date_val > date_lit; break;
+                case 3: passes = date_val >= date_lit; break;
+                case 4: passes = date_val == date_lit; break;
+            }
+        } else {
+            union { uint32_t u; float f; } conv;
+            conv.u = (uint32_t)(pc.value & 0xFFFFFFFFull);
+            float lit = conv.f;
+            switch (pc.op) {
+                case 0: passes = col_val < lit; break;
+                case 1: passes = col_val <= lit; break;
+                case 2: passes = col_val > lit; break;
+                case 3: passes = col_val >= lit; break;
+                case 4: passes = col_val == lit; break;
+            }
+        }
+    }
+    
+    // Initialize local values based on aggregation type
+    if (aggType == 0) {
+        // COUNT
+        localVals[tid] = passes ? 1.0f : 0.0f;
+        localCounts[tid] = passes ? 1 : 0;
+    } else if (aggType == 3) {
+        // MIN
+        localVals[tid] = passes ? target_val : FLT_MAX;
+    } else if (aggType == 4) {
+        // MAX
+        localVals[tid] = passes ? target_val : -FLT_MAX;
+    } else {
+        // SUM or AVG
+        localVals[tid] = passes ? target_val : 0.0f;
+        localCounts[tid] = passes ? 1 : 0;
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    
+    // Parallel reduction
+    for (uint stride = tgSize >> 1; stride > 0; stride >>= 1) {
+        if (tid < stride) {
+            if (aggType == 3) {
+                // MIN
+                localVals[tid] = min(localVals[tid], localVals[tid + stride]);
+            } else if (aggType == 4) {
+                // MAX
+                localVals[tid] = max(localVals[tid], localVals[tid + stride]);
+            } else {
+                // COUNT, SUM, AVG
+                localVals[tid] += localVals[tid + stride];
+                if (aggType == 0 || aggType == 2) {
+                    localCounts[tid] += localCounts[tid + stride];
+                }
+            }
+        }
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+    }
+    
+    // Thread 0 in each threadgroup atomically updates global result
+    if (tid == 0) {
+        union { uint32_t u; float f; } conv;
+        conv.f = localVals[0];
+        
+        if (aggType == 3) {
+            // MIN: atomic min
+            uint expected = atomic_load_explicit(out_result_bits, memory_order_relaxed);
+            while (true) {
+                union { uint32_t u; float f; } current;
+                current.u = expected;
+                float new_val = min(current.f, conv.f);
+                union { uint32_t u; float f; } new_conv;
+                new_conv.f = new_val;
+                if (atomic_compare_exchange_weak_explicit(out_result_bits, &expected, new_conv.u,
+                                                          memory_order_relaxed, memory_order_relaxed)) {
+                    break;
+                }
+            }
+        } else if (aggType == 4) {
+            // MAX: atomic max
+            uint expected = atomic_load_explicit(out_result_bits, memory_order_relaxed);
+            while (true) {
+                union { uint32_t u; float f; } current;
+                current.u = expected;
+                float new_val = max(current.f, conv.f);
+                union { uint32_t u; float f; } new_conv;
+                new_conv.f = new_val;
+                if (atomic_compare_exchange_weak_explicit(out_result_bits, &expected, new_conv.u,
+                                                          memory_order_relaxed, memory_order_relaxed)) {
+                    break;
+                }
+            }
+        } else {
+            // COUNT, SUM, AVG: atomic add
+            atomicAddF32Bits(out_result_bits, conv.f);
+        }
+        
+        if (aggType == 0 || aggType == 2) {
+            atomic_fetch_add_explicit(out_count, localCounts[0], memory_order_relaxed);
+        }
+    }
+}
+
 } // namespace ops
