@@ -43,10 +43,30 @@ static void traverse(const json& node, Plan& p) {
             p.nodes.push_back(s);
         } else if (name == "FILTER") {
             IRNode f; f.type = IRNode::Type::Filter; f.filter.predicate = extra; p.nodes.push_back(f);
-        } else if (name == "UNGROUPED_AGGREGATE" || name == "HASH_GROUP_BY" || name == "AGGREGATE") {
+        } else if (name == "UNGROUPED_AGGREGATE" || name == "AGGREGATE") {
             IRNode a; a.type = IRNode::Type::Aggregate; a.aggregate.func = "sum"; std::string e = extra;
             auto s = e.find("sum("); if (s != std::string::npos) { auto r = e.find(')', s+4); if (r != std::string::npos) e = e.substr(s+4, r-(s+4)); }
             a.aggregate.expr = e; p.nodes.push_back(a);
+        } else if (name == "HASH_GROUP_BY") {
+            // Parse GROUP BY node
+            IRNode g; g.type = IRNode::Type::GroupBy;
+            
+            // Extract group by keys from extra_info
+            if (node.contains("extra_info") && node["extra_info"].is_object()) {
+                const auto& ei = node["extra_info"];
+                if (ei.contains("Groups") && ei["Groups"].is_string()) {
+                    std::string groups = ei["Groups"].get_string();
+                    // Parse group columns (e.g., "#0" or "l_orderkey")
+                    g.groupBy.keys.push_back(groups);
+                }
+            }
+            
+            // Extract aggregate expressions from extra field
+            if (!extra.empty()) {
+                g.groupBy.aggs.push_back(extra);
+            }
+            
+            p.nodes.push_back(g);
         } else if (name == "ORDER_BY" || name == "ORDER") {
             IRNode o; o.type = IRNode::Type::OrderBy;
             // Parse ORDER BY columns from extra (simplified)
@@ -186,7 +206,7 @@ Plan Planner::fromSQL(const std::string& sql) {
             }
             aggexpr = sql.substr(start, end - start);
         }
-        std::regex re_where(R"(where\s+(.+?)(?:\s+order\s+by|\s+limit|$))", std::regex::icase);
+        std::regex re_where(R"(where\s+(.+?)(?:\s+group\s+by|\s+order\s+by|\s+limit|$))", std::regex::icase);
         if (std::regex_search(sql, m, re_where) && m.size()>1) predicate = m[1].str();
         
         // Parse ORDER BY
@@ -204,6 +224,27 @@ Plan Planner::fromSQL(const std::string& sql) {
             p.nodes.push_back(o);
         }
         
+        // Parse GROUP BY
+        std::regex re_groupby(R"(group\s+by\s+([A-Za-z_][A-Za-z0-9_,\s]*?)(?:\s+order\s+by|\s+limit|$))", std::regex::icase);
+        if (std::regex_search(sql, m, re_groupby) && m.size()>1) {
+            IRNode g; g.type = IRNode::Type::GroupBy;
+            std::string groupCols = m[1].str();
+            // Split by comma for multiple columns
+            size_t start = 0;
+            while (start < groupCols.size()) {
+                size_t comma = groupCols.find(',', start);
+                if (comma == std::string::npos) comma = groupCols.size();
+                std::string col = groupCols.substr(start, comma - start);
+                // Trim spaces
+                col.erase(0, col.find_first_not_of(" \t\n\r"));
+                col.erase(col.find_last_not_of(" \t\n\r") + 1);
+                if (!col.empty()) g.groupBy.keys.push_back(col);
+                start = comma + 1;
+            }
+            if (!aggexpr.empty()) g.groupBy.aggs.push_back(aggexpr);
+            p.nodes.push_back(g);
+        }
+        
         // Parse LIMIT
         std::regex re_limit(R"(limit\s+(\d+))", std::regex::icase);
         if (std::regex_search(sql, m, re_limit) && m.size()>1) {
@@ -213,23 +254,29 @@ Plan Planner::fromSQL(const std::string& sql) {
             p.nodes.push_back(l);
         }
         
-        // Only add aggregate if SUM is present
+        // Only add aggregate if SUM is present AND no GROUP BY
         if (!aggexpr.empty()) {
-            if (!predicate.empty()) { IRNode f; f.type = IRNode::Type::Filter; f.filter.predicate = predicate; p.nodes.push_back(f); }
-            IRNode a; a.type = IRNode::Type::Aggregate; a.aggregate.func = "sum"; a.aggregate.expr = aggexpr;
-            // Check if expression contains arithmetic operators
-            a.aggregate.hasExpression = (aggexpr.find('*') != std::string::npos || 
-                                         aggexpr.find('/') != std::string::npos ||
-                                         aggexpr.find('+') != std::string::npos ||
-                                         aggexpr.find('-') != std::string::npos);
-            p.nodes.push_back(a);
+            bool hasGroupBy = false;
+            for (auto& n : p.nodes) if (n.type == IRNode::Type::GroupBy) hasGroupBy = true;
+            
+            if (!hasGroupBy) {
+                if (!predicate.empty()) { IRNode f; f.type = IRNode::Type::Filter; f.filter.predicate = predicate; p.nodes.push_back(f); }
+                IRNode a; a.type = IRNode::Type::Aggregate; a.aggregate.func = "sum"; a.aggregate.expr = aggexpr;
+                // Check if expression contains arithmetic operators
+                a.aggregate.hasExpression = (aggexpr.find('*') != std::string::npos || 
+                                             aggexpr.find('/') != std::string::npos ||
+                                             aggexpr.find('+') != std::string::npos ||
+                                             aggexpr.find('-') != std::string::npos);
+                p.nodes.push_back(a);
+            }
         }
     }
-    // Ensure order Scan -> Join/Filter -> OrderBy -> Limit -> Aggregate
+    // Ensure order Scan -> Join/Filter -> GroupBy -> OrderBy -> Limit -> Aggregate
     std::vector<IRNode> ordered;
     for (auto& n : p.nodes) if (n.type==IRNode::Type::Scan) ordered.push_back(n);
     for (auto& n : p.nodes) if (n.type==IRNode::Type::Join) ordered.push_back(n);
     for (auto& n : p.nodes) if (n.type==IRNode::Type::Filter) ordered.push_back(n);
+    for (auto& n : p.nodes) if (n.type==IRNode::Type::GroupBy) ordered.push_back(n);
     for (auto& n : p.nodes) if (n.type==IRNode::Type::OrderBy) ordered.push_back(n);
     for (auto& n : p.nodes) if (n.type==IRNode::Type::Limit) ordered.push_back(n);
     for (auto& n : p.nodes) if (n.type==IRNode::Type::Aggregate) ordered.push_back(n);

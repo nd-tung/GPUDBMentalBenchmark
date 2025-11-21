@@ -13,9 +13,10 @@
 #include "GpuExecutor.hpp"
 #include "JoinExecutor.hpp"
 #include "SortExecutor.hpp"
+#include "GroupByExecutor.hpp"
 #include "ExprEval.hpp"
 
-static std::string g_dataset_path = "Data/SF-1/";
+static std::string g_dataset_path = "GPUDBMentalBenchmark/Data/SF-1/";
 
 static std::vector<float> loadFloatColumn(const std::string& filePath, int columnIndex) {
     std::vector<float> data;
@@ -94,6 +95,70 @@ static void runEngineSQL(const std::string& sql) {
             printf("Matched rows: %u\n", joinRes.match_count);
             printf("Upload time: %0.2f ms\n", joinRes.upload_ms);
             printf("GPU kernel time: %0.2f ms\n", joinRes.gpu_ms);
+            return;
+        }
+    }
+    
+    // Check for GROUP BY
+    bool hasGroupBy = false;
+    std::string groupByCol;
+    std::string aggCol;
+    for (const auto& n : plan.nodes) {
+        if (n.type == IRNode::Type::GroupBy) {
+            hasGroupBy = true;
+            if (!n.groupBy.keys.empty()) {
+                groupByCol = n.groupBy.keys[0];
+            }
+            if (!n.groupBy.aggs.empty()) {
+                // Extract column from aggregate expression (e.g., "l_extendedprice" from "sum(l_extendedprice)")
+                std::string agg = n.groupBy.aggs[0];
+                // Parse out the column name from SUM(column)
+                auto start = agg.find('(');
+                auto end = agg.rfind(')');
+                if (start != std::string::npos && end != std::string::npos && end > start) {
+                    aggCol = agg.substr(start + 1, end - start - 1);
+                    // Trim spaces
+                    aggCol.erase(0, aggCol.find_first_not_of(" \t\n\r"));
+                    aggCol.erase(aggCol.find_last_not_of(" \t\n\r") + 1);
+                } else {
+                    aggCol = agg;
+                }
+            }
+            break;
+        }
+    }
+    
+    if (want_gpu && hasGroupBy && !groupByCol.empty() && !aggCol.empty()) {
+        // Extract table name
+        std::string table = "lineitem";
+        for (const auto& n : plan.nodes) {
+            if (n.type == IRNode::Type::Scan) {
+                table = n.scan.table;
+                break;
+            }
+        }
+        
+        // Run GPU GROUP BY
+        auto groupByRes = engine::GroupByExecutor::runGroupBySum(g_dataset_path, table, groupByCol, aggCol);
+        
+        if (!groupByRes.groups.empty()) {
+            std::cout << "Result:" << std::endl;
+            std::cout << "GROUP BY " << groupByCol << " with SUM(" << aggCol << ")" << std::endl;
+            printf("Upload time: %0.2f ms\n", groupByRes.upload_ms);
+            printf("GPU kernel time: %0.2f ms\n", groupByRes.gpu_ms);
+            printf("Number of groups: %zu\n", groupByRes.groups.size());
+            
+            // Show results (limit to first 10 for display)
+            size_t count = 0;
+            for (const auto& [key, sum] : groupByRes.groups) {
+                std::cout << groupByCol << "=" << key << " -> SUM=" << sum << std::endl;
+                if (++count >= 10) {
+                    if (groupByRes.groups.size() > 10) {
+                        std::cout << "... (" << (groupByRes.groups.size() - 10) << " more groups)" << std::endl;
+                    }
+                    break;
+                }
+            }
             return;
         }
     }
@@ -255,16 +320,20 @@ int main(int argc, const char* argv[]) {
         "  AND l_discount >= 0.05 AND l_discount <= 0.07\n"
         "  AND l_quantity < 24";
 
-    // Args: sf1|sf10 and optional --sql "..."
+    // Args: sf1|sf10 and optional --sql "..." or just SQL as first arg
     for (int i = 1; i < argc; ++i) {
         std::string arg = argv[i];
-        if (arg == "sf1") g_dataset_path = "Data/SF-1/";
-        else if (arg == "sf10") g_dataset_path = "Data/SF-10/";
+        if (arg == "sf1") g_dataset_path = "GPUDBMentalBenchmark/Data/SF-1/";
+        else if (arg == "sf10") g_dataset_path = "GPUDBMentalBenchmark/Data/SF-10/";
         else if (arg == "--sql" && i+1 < argc) { sql = argv[++i]; }
         else if (arg == "help" || arg == "--help" || arg == "-h") {
             std::cout << "GPUDBEngineHost" << std::endl;
-            std::cout << "Usage: GPUDBEngineHost [sf1|sf10] [--sql 'QUERY']" << std::endl;
+            std::cout << "Usage: GPUDBEngineHost [sf1|sf10] [--sql 'QUERY' | 'QUERY']" << std::endl;
             return 0;
+        }
+        else if (i == 1 && arg.find("SELECT") != std::string::npos) {
+            // First arg is a SQL query if it contains SELECT
+            sql = arg;
         }
     }
     runEngineSQL(sql);
