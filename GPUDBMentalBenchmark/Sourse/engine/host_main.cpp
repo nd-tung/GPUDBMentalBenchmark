@@ -12,6 +12,7 @@
 #include "Executor.hpp"
 #include "GpuExecutor.hpp"
 #include "JoinExecutor.hpp"
+#include "SortExecutor.hpp"
 #include "ExprEval.hpp"
 
 static std::string g_dataset_path = "Data/SF-1/";
@@ -93,6 +94,54 @@ static void runEngineSQL(const std::string& sql) {
             printf("Matched rows: %u\n", joinRes.match_count);
             printf("Upload time: %0.2f ms\n", joinRes.upload_ms);
             printf("GPU kernel time: %0.2f ms\n", joinRes.gpu_ms);
+            return;
+        }
+    }
+    
+    // Check for ORDER BY (without aggregation for now - just sorting and display)
+    bool hasOrderBy = false;
+    std::string orderByCol;
+    bool orderAscending = true;
+    for (const auto& n : plan.nodes) {
+        if (n.type == IRNode::Type::OrderBy) {
+            hasOrderBy = true;
+            if (!n.orderBy.columns.empty()) {
+                orderByCol = n.orderBy.columns[0];
+                if (!n.orderBy.ascending.empty()) {
+                    orderAscending = n.orderBy.ascending[0];
+                }
+            }
+            break;
+        }
+    }
+    
+    if (want_gpu && hasOrderBy && !orderByCol.empty()) {
+        // Extract table name
+        std::string table = "lineitem";
+        for (const auto& n : plan.nodes) {
+            if (n.type == IRNode::Type::Scan) {
+                table = n.scan.table;
+                break;
+            }
+        }
+        
+        // For now, just run sort and show first N rows
+        auto sortRes = engine::SortExecutor::runSort(g_dataset_path, table, orderByCol, orderAscending);
+        
+        if (!sortRes.indices.empty()) {
+            std::cout << "Result (first 10 rows):" << std::endl;
+            std::cout << "Sorted by " << orderByCol << " (" << (orderAscending ? "ASC" : "DESC") << ")" << std::endl;
+            printf("Upload time: %0.2f ms\n", sortRes.upload_ms);
+            printf("GPU kernel time: %0.2f ms\n", sortRes.gpu_ms);
+            printf("Total rows: %zu\n", sortRes.indices.size());
+            
+            // Show first 10 sorted indices
+            std::cout << "Sorted indices (first 10): ";
+            for (size_t i = 0; i < std::min(size_t(10), sortRes.indices.size()); ++i) {
+                std::cout << sortRes.indices[i];
+                if (i < std::min(size_t(10), sortRes.indices.size()) - 1) std::cout << ", ";
+            }
+            std::cout << std::endl;
             return;
         }
     }

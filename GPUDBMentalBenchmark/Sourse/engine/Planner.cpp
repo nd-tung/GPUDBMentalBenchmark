@@ -186,24 +186,42 @@ Plan Planner::fromSQL(const std::string& sql) {
             }
             aggexpr = sql.substr(start, end - start);
         }
-        std::regex re_where(R"(where\s+(.+))", std::regex::icase);
+        std::regex re_where(R"(where\s+(.+?)(?:\s+order\s+by|\s+limit|$))", std::regex::icase);
         if (std::regex_search(sql, m, re_where) && m.size()>1) predicate = m[1].str();
-        if (aggexpr.empty()) aggexpr = "l_extendedprice";
         
-        if (!predicate.empty()) { IRNode f; f.type = IRNode::Type::Filter; f.filter.predicate = predicate; p.nodes.push_back(f); }
-        IRNode a; a.type = IRNode::Type::Aggregate; a.aggregate.func = "sum"; a.aggregate.expr = aggexpr;
-        // Check if expression contains arithmetic operators
-        a.aggregate.hasExpression = (aggexpr.find('*') != std::string::npos || 
-                                     aggexpr.find('/') != std::string::npos ||
-                                     aggexpr.find('+') != std::string::npos ||
-                                     aggexpr.find('-') != std::string::npos);
-        p.nodes.push_back(a);
+        // Parse ORDER BY
+        std::regex re_orderby(R"(order\s+by\s+([A-Za-z_][A-Za-z0-9_]*)\s*(asc|desc)?)", std::regex::icase);
+        if (std::regex_search(sql, m, re_orderby) && m.size()>1) {
+            IRNode o; o.type = IRNode::Type::OrderBy;
+            o.orderBy.columns.push_back(m[1].str());
+            bool isAsc = true;
+            if (m.size() > 2 && m[2].matched) {
+                std::string dir = m[2].str();
+                std::transform(dir.begin(), dir.end(), dir.begin(), ::tolower);
+                isAsc = (dir != "desc");
+            }
+            o.orderBy.ascending.push_back(isAsc);
+            p.nodes.push_back(o);
+        }
+        
+        // Only add aggregate if SUM is present
+        if (!aggexpr.empty()) {
+            if (!predicate.empty()) { IRNode f; f.type = IRNode::Type::Filter; f.filter.predicate = predicate; p.nodes.push_back(f); }
+            IRNode a; a.type = IRNode::Type::Aggregate; a.aggregate.func = "sum"; a.aggregate.expr = aggexpr;
+            // Check if expression contains arithmetic operators
+            a.aggregate.hasExpression = (aggexpr.find('*') != std::string::npos || 
+                                         aggexpr.find('/') != std::string::npos ||
+                                         aggexpr.find('+') != std::string::npos ||
+                                         aggexpr.find('-') != std::string::npos);
+            p.nodes.push_back(a);
+        }
     }
-    // Ensure order Scan -> Join/Filter -> Aggregate
+    // Ensure order Scan -> Join/Filter -> OrderBy -> Aggregate
     std::vector<IRNode> ordered;
     for (auto& n : p.nodes) if (n.type==IRNode::Type::Scan) ordered.push_back(n);
     for (auto& n : p.nodes) if (n.type==IRNode::Type::Join) ordered.push_back(n);
     for (auto& n : p.nodes) if (n.type==IRNode::Type::Filter) ordered.push_back(n);
+    for (auto& n : p.nodes) if (n.type==IRNode::Type::OrderBy) ordered.push_back(n);
     for (auto& n : p.nodes) if (n.type==IRNode::Type::Aggregate) ordered.push_back(n);
     p.nodes.swap(ordered);
     return p;
