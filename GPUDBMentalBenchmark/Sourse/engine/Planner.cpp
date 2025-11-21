@@ -204,6 +204,15 @@ Plan Planner::fromSQL(const std::string& sql) {
             p.nodes.push_back(o);
         }
         
+        // Parse LIMIT
+        std::regex re_limit(R"(limit\s+(\d+))", std::regex::icase);
+        if (std::regex_search(sql, m, re_limit) && m.size()>1) {
+            IRNode l; l.type = IRNode::Type::Limit;
+            l.limit.count = std::stoll(m[1].str());
+            l.limit.offset = 0;
+            p.nodes.push_back(l);
+        }
+        
         // Only add aggregate if SUM is present
         if (!aggexpr.empty()) {
             if (!predicate.empty()) { IRNode f; f.type = IRNode::Type::Filter; f.filter.predicate = predicate; p.nodes.push_back(f); }
@@ -216,12 +225,13 @@ Plan Planner::fromSQL(const std::string& sql) {
             p.nodes.push_back(a);
         }
     }
-    // Ensure order Scan -> Join/Filter -> OrderBy -> Aggregate
+    // Ensure order Scan -> Join/Filter -> OrderBy -> Limit -> Aggregate
     std::vector<IRNode> ordered;
     for (auto& n : p.nodes) if (n.type==IRNode::Type::Scan) ordered.push_back(n);
     for (auto& n : p.nodes) if (n.type==IRNode::Type::Join) ordered.push_back(n);
     for (auto& n : p.nodes) if (n.type==IRNode::Type::Filter) ordered.push_back(n);
     for (auto& n : p.nodes) if (n.type==IRNode::Type::OrderBy) ordered.push_back(n);
+    for (auto& n : p.nodes) if (n.type==IRNode::Type::Limit) ordered.push_back(n);
     for (auto& n : p.nodes) if (n.type==IRNode::Type::Aggregate) ordered.push_back(n);
     p.nodes.swap(ordered);
     return p;

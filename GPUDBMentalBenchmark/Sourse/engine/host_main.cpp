@@ -116,30 +116,41 @@ static void runEngineSQL(const std::string& sql) {
     }
     
     if (want_gpu && hasOrderBy && !orderByCol.empty()) {
-        // Extract table name
+        // Extract table name and LIMIT
         std::string table = "lineitem";
+        int64_t limitCount = -1;
         for (const auto& n : plan.nodes) {
             if (n.type == IRNode::Type::Scan) {
                 table = n.scan.table;
-                break;
+            } else if (n.type == IRNode::Type::Limit) {
+                limitCount = n.limit.count;
             }
         }
         
-        // For now, just run sort and show first N rows
+        // Run GPU sort
         auto sortRes = engine::SortExecutor::runSort(g_dataset_path, table, orderByCol, orderAscending);
         
         if (!sortRes.indices.empty()) {
-            std::cout << "Result (first 10 rows):" << std::endl;
-            std::cout << "Sorted by " << orderByCol << " (" << (orderAscending ? "ASC" : "DESC") << ")" << std::endl;
+            // Apply LIMIT if specified
+            size_t displayCount = sortRes.indices.size();
+            if (limitCount > 0 && static_cast<size_t>(limitCount) < displayCount) {
+                displayCount = static_cast<size_t>(limitCount);
+            }
+            
+            std::cout << "Result:" << std::endl;
+            std::cout << "Sorted by " << orderByCol << " (" << (orderAscending ? "ASC" : "DESC") << ")";
+            if (limitCount > 0) std::cout << " LIMIT " << limitCount;
+            std::cout << std::endl;
             printf("Upload time: %0.2f ms\n", sortRes.upload_ms);
             printf("GPU kernel time: %0.2f ms\n", sortRes.gpu_ms);
-            printf("Total rows: %zu\n", sortRes.indices.size());
+            printf("Total rows sorted: %zu\n", sortRes.indices.size());
+            printf("Rows returned: %zu\n", displayCount);
             
-            // Show first 10 sorted indices
-            std::cout << "Sorted indices (first 10): ";
-            for (size_t i = 0; i < std::min(size_t(10), sortRes.indices.size()); ++i) {
+            // Show indices
+            std::cout << "Sorted indices: ";
+            for (size_t i = 0; i < displayCount; ++i) {
                 std::cout << sortRes.indices[i];
-                if (i < std::min(size_t(10), sortRes.indices.size()) - 1) std::cout << ", ";
+                if (i < displayCount - 1) std::cout << ", ";
             }
             std::cout << std::endl;
             return;
