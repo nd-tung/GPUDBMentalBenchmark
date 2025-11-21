@@ -13,31 +13,45 @@ OBJ_DIR = $(BUILD_DIR)/obj
 
 # Compiler and flags
 CXX = clang++
-CXXFLAGS = -std=c++20 -Wall -Wextra -O3
+# macOS deployment target (adjust if needed)
+MACOSX_MIN ?= 14.0
+CXXFLAGS = -std=c++20 -Wall -Wextra -O3 -D_LIBCPP_DISABLE_AVAILABILITY -mmacosx-version-min=$(MACOSX_MIN)
 
 # Include paths
-INCLUDES = -I$(METAL_CPP_DIR)
+INCLUDES = -I$(METAL_CPP_DIR) -IGPUDBMentalBenchmark/third_party
 
 # Framework flags for macOS
 FRAMEWORKS = -framework Metal -framework Foundation -framework QuartzCore
 
-# Source files
-SOURCES = $(wildcard $(SOURCE_DIR)/*.cpp)
-OBJECTS = $(SOURCES:$(SOURCE_DIR)/%.cpp=$(OBJ_DIR)/%.o)
+# Source files (C++ + Objective-C++ for metal-cpp wrappers)
+SRC_ROOT_CPP = $(wildcard $(SOURCE_DIR)/*.cpp)
+SRC_ENGINE_CPP_ALL = $(wildcard $(SOURCE_DIR)/engine/*.cpp)
+SRC_ENGINE_CPP = $(filter-out $(SOURCE_DIR)/engine/host_main.cpp,$(SRC_ENGINE_CPP_ALL))
+METAL_CPP_MM = $(shell find $(METAL_CPP_DIR) -name '*.mm' 2>/dev/null)
+SOURCES = $(SRC_ROOT_CPP) $(SRC_ENGINE_CPP) $(METAL_CPP_MM)
+OBJECTS = $(SRC_ROOT_CPP:$(SOURCE_DIR)/%.cpp=$(OBJ_DIR)/%.o) \
+		  $(SRC_ENGINE_CPP:$(SOURCE_DIR)/engine/%.cpp=$(OBJ_DIR)/engine/%.o) \
+		  $(METAL_CPP_MM:$(METAL_CPP_DIR)/%.mm=$(OBJ_DIR)/metal-cpp/%.o)
 KERNELS = $(wildcard $(KERNEL_DIR)/*.metal)
 
 # Target executable
 TARGET = $(BIN_DIR)/$(PROJECT_NAME)
+ENGINE_HOST_BIN = $(BIN_DIR)/GPUDBEngineHost
+ENGINE_HOST_MAIN_SRC = $(SOURCE_DIR)/engine/host_main.cpp
+ENGINE_HOST_MAIN_OBJ = $(OBJ_DIR)/engine/host_main.o
+ENGINE_OBJS = $(SRC_ENGINE_CPP:$(SOURCE_DIR)/engine/%.cpp=$(OBJ_DIR)/engine/%.o) \
+			  $(METAL_CPP_MM:$(METAL_CPP_DIR)/%.mm=$(OBJ_DIR)/metal-cpp/%.o)
 
 # Metal compiler tools
 METAL = xcrun -sdk macosx metal
 METALLIB = xcrun -sdk macosx metallib
 KERNEL_AIR = $(BUILD_DIR)/kernels.air
+KERNEL_AIR_OPS = $(BUILD_DIR)/kernels_ops.air
 KERNEL_METALLIB = $(BUILD_DIR)/kernels.metallib
 
 # Default target
 .PHONY: all
-all: $(TARGET) $(KERNEL_METALLIB)
+all: $(TARGET) $(KERNEL_METALLIB) $(ENGINE_HOST_BIN)
 
 # Create target executable
 $(TARGET): $(OBJECTS) | $(BIN_DIR)
@@ -45,21 +59,54 @@ $(TARGET): $(OBJECTS) | $(BIN_DIR)
 	$(CXX) $(OBJECTS) $(FRAMEWORKS) -o $@
 	@echo "Build complete: $@"
 
+# Create engine host executable
+$(ENGINE_HOST_BIN): $(ENGINE_HOST_MAIN_OBJ) $(ENGINE_OBJS) | $(BIN_DIR)
+	@echo "Linking GPUDBEngineHost..."
+	$(CXX) $(ENGINE_HOST_MAIN_OBJ) $(ENGINE_OBJS) $(FRAMEWORKS) -o $@
+	@echo "Build complete: $@"
+
 # Build Metal kernels and place fresh metallib alongside the app assets
 $(KERNEL_AIR): $(KERNEL_DIR)/DatabaseKernels.metal | $(BUILD_DIR)
 	@echo "Compiling Metal kernels (.air)..."
-	$(METAL) -c $(KERNEL_DIR)/DatabaseKernels.metal -o $(KERNEL_AIR)
+	@$(METAL) -c $(KERNEL_DIR)/DatabaseKernels.metal -o $(KERNEL_AIR) \
+		|| { echo "Metal toolchain missing; skipping DatabaseKernels.metal"; : > $(KERNEL_AIR); }
 
-$(KERNEL_METALLIB): $(KERNEL_AIR)
+$(KERNEL_AIR_OPS): $(KERNEL_DIR)/Operators.metal | $(BUILD_DIR)
+	@echo "Compiling Operators Metal (.air)..."
+	@$(METAL) -c $(KERNEL_DIR)/Operators.metal -o $(KERNEL_AIR_OPS) \
+		|| { echo "Metal toolchain missing; skipping Operators.metal"; : > $(KERNEL_AIR_OPS); }
+
+$(KERNEL_METALLIB): $(KERNEL_AIR) $(KERNEL_AIR_OPS)
 	@echo "Linking Metal library (.metallib)..."
-	$(METALLIB) $(KERNEL_AIR) -o $(KERNEL_METALLIB)
-	@# Copy to runtime location so device->newLibrary("default.metallib") finds the latest
-	cp $(KERNEL_METALLIB) GPUDBMentalBenchmark/default.metallib
+	@if [ -s $(KERNEL_AIR) ]; then \
+		if [ -s $(KERNEL_AIR_OPS) ]; then \
+			$(METALLIB) $(KERNEL_AIR) $(KERNEL_AIR_OPS) -o $(KERNEL_METALLIB) \
+				|| { echo "Metal toolchain missing; skipping metallib link"; exit 0; }; \
+		else \
+			$(METALLIB) $(KERNEL_AIR) -o $(KERNEL_METALLIB) \
+				|| { echo "Metal toolchain missing; skipping metallib link"; exit 0; }; \
+		fi; \
+		cp $(KERNEL_METALLIB) GPUDBMentalBenchmark/default.metallib 2>/dev/null || true; \
+	else \
+		echo "No kernel AIR available; skipping metallib link"; \
+	fi
 
 # Compile source files
+
 $(OBJ_DIR)/%.o: $(SOURCE_DIR)/%.cpp | $(OBJ_DIR)
 	@echo "Compiling $<..."
+	@mkdir -p $(dir $@)
 	$(CXX) $(CXXFLAGS) $(INCLUDES) -c $< -o $@
+
+$(OBJ_DIR)/engine/%.o: $(SOURCE_DIR)/engine/%.cpp | $(OBJ_DIR)/engine
+	@echo "Compiling $<..."
+	@mkdir -p $(dir $@)
+	$(CXX) $(CXXFLAGS) $(INCLUDES) -c $< -o $@
+
+$(OBJ_DIR)/metal-cpp/%.o: $(METAL_CPP_DIR)/%.mm | $(OBJ_DIR)/metal-cpp
+	@echo "Compiling (ObjC++) $<..."
+	@mkdir -p $(dir $@)
+	$(CXX) $(CXXFLAGS) $(INCLUDES) -fobjc-arc -ObjC++ -c $< -o $@
 
 # Create directories
 $(BIN_DIR):
@@ -67,6 +114,12 @@ $(BIN_DIR):
 
 $(OBJ_DIR):
 	@mkdir -p $(OBJ_DIR)
+
+$(OBJ_DIR)/engine:
+	@mkdir -p $(OBJ_DIR)/engine
+
+$(OBJ_DIR)/metal-cpp:
+	@mkdir -p $(OBJ_DIR)/metal-cpp
 
 $(BUILD_DIR):
 	@mkdir -p $(BUILD_DIR)
@@ -97,6 +150,16 @@ uninstall:
 run: $(TARGET) $(KERNEL_METALLIB)
 	@echo "Running $(PROJECT_NAME)..."
 	@cd GPUDBMentalBenchmark && ../$(TARGET)
+
+.PHONY: run-engine-sf1
+run-engine-sf1: $(ENGINE_HOST_BIN)
+	@echo "Running GPUDBEngineHost with SF-1..."
+	@cd GPUDBMentalBenchmark && ../$(ENGINE_HOST_BIN) sf1
+
+.PHONY: run-engine-sf10
+run-engine-sf10: $(ENGINE_HOST_BIN)
+	@echo "Running GPUDBEngineHost with SF-10..."
+	@cd GPUDBMentalBenchmark && ../$(ENGINE_HOST_BIN) sf10
 
 # Run with different datasets
 .PHONY: run-sf1

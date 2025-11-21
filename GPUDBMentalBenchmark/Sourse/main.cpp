@@ -1,7 +1,3 @@
-#define NS_PRIVATE_IMPLEMENTATION
-#define CA_PRIVATE_IMPLEMENTATION
-#define MTL_PRIVATE_IMPLEMENTATION
-
 #include "Metal/Metal.hpp"
 #include "Foundation/Foundation.hpp"
 #include <iostream>
@@ -960,6 +956,7 @@ void runQ6Benchmark(MTL::Device* device, MTL::CommandQueue* commandQueue, MTL::L
     stage1FunctionName->release();
     stage2FunctionName->release();
 }
+
 
 
 // C++ structs for reading final results
