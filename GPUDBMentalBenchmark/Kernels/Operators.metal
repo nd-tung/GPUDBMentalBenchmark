@@ -129,45 +129,82 @@ struct PredicateClause {
     int64_t value;   // encoded literal (date as YYYYMMDD or bitcasted double via int64)
 };
 
-// Kernel: scan + predicates + sum over single float column
-// Simplified kernel: only target column + predicate array (all numeric comparisons).
-// Optimized version: per-threadgroup partial reduction to minimize global atomics.
-// Each thread writes its passing value into threadgroup memory, performs parallel reduction,
-// and a single atomicAdd updates the global accumulator.
-kernel void scan_filter_sum_f32(const device float* target_col,
-                                constant PredicateClause* clauses,
-                                constant uint& clause_count,
-                                constant uint& row_count,
-                                device atomic_uint* out_sum_bits,
+// RPN expression token for arithmetic evaluation
+struct ExprToken {
+    uint type;       // 0:column_ref 1:literal 2:operator
+    uint colIndex;   // if type==0, column index
+    float literal;   // if type==1, literal value
+    uint op;         // if type==2, operator: 0:+ 1:- 2:* 3:/
+};
+
+// Multi-column scan+filter+sum kernel
+// Accepts up to 8 column buffers via [[buffer(0..7)]]
+// Predicates reference columns by index (0..7)
+// Target aggregation column is always buffer(0)
+kernel void scan_filter_sum_f32(const device float* col0 [[buffer(0)]],
+                                const device float* col1 [[buffer(1)]],
+                                const device float* col2 [[buffer(2)]],
+                                const device float* col3 [[buffer(3)]],
+                                const device float* col4 [[buffer(4)]],
+                                const device float* col5 [[buffer(5)]],
+                                const device float* col6 [[buffer(6)]],
+                                const device float* col7 [[buffer(7)]],
+                                constant PredicateClause* clauses [[buffer(8)]],
+                                constant uint& col_count [[buffer(9)]],
+                                constant uint& clause_count [[buffer(10)]],
+                                constant uint& row_count [[buffer(11)]],
+                                device atomic_uint* out_sum_bits [[buffer(12)]],
                                 uint gid [[thread_position_in_grid]],
                                 uint tid [[thread_index_in_threadgroup]],
                                 uint tgSize [[threads_per_threadgroup]]) {
     if (gid >= row_count) return;
-    // Cap threadgroup size we actually use (static alloc below)
     if (tgSize > 1024) tgSize = 1024;
     threadgroup float localVals[1024];
 
-    // Evaluate predicates; if any fail we contribute 0.
-    float v = target_col[gid];
+    // Build local column pointer array for dynamic indexing
+    const device float* cols[8] = {col0, col1, col2, col3, col4, col5, col6, col7};
+    
+    // Target column for aggregation is always col0
+    float target_val = cols[0][gid];
+    
+    // Evaluate predicates with dynamic column access
     bool passes = true;
     for (uint c = 0; c < clause_count && passes; ++c) {
         PredicateClause pc = clauses[c];
-        // Numeric float literal in lower 32 bits
-        union { uint32_t u; float f; } conv; conv.u = (uint32_t)(pc.value & 0xFFFFFFFFull);
-        float lit = conv.f;
-        switch (pc.op) {
-            case 0: passes = v < lit; break;
-            case 1: passes = v <= lit; break;
-            case 2: passes = v > lit; break;
-            case 3: passes = v >= lit; break;
-            case 4: passes = v == lit; break;
+        if (pc.colIndex >= col_count) { passes = false; break; }
+        
+        float col_val = cols[pc.colIndex][gid];
+        
+        if (pc.isDate) {
+            // Date stored as YYYYMMDD integer in column, compare as integers
+            int date_val = as_type<int>(col_val);  // reinterpret float bits as int
+            int date_lit = (int)(pc.value & 0xFFFFFFFFull);  // lower 32 bits
+            switch (pc.op) {
+                case 0: passes = date_val < date_lit; break;
+                case 1: passes = date_val <= date_lit; break;
+                case 2: passes = date_val > date_lit; break;
+                case 3: passes = date_val >= date_lit; break;
+                case 4: passes = date_val == date_lit; break;
+            }
+        } else {
+            // Numeric comparison
+            union { uint32_t u; float f; } conv; 
+            conv.u = (uint32_t)(pc.value & 0xFFFFFFFFull);
+            float lit = conv.f;
+            switch (pc.op) {
+                case 0: passes = col_val < lit; break;
+                case 1: passes = col_val <= lit; break;
+                case 2: passes = col_val > lit; break;
+                case 3: passes = col_val >= lit; break;
+                case 4: passes = col_val == lit; break;
+            }
         }
     }
-    localVals[tid] = (passes ? v : 0.0f);
+    
+    localVals[tid] = (passes ? target_val : 0.0f);
     threadgroup_barrier(mem_flags::mem_threadgroup);
 
-    // Parallel reduction inside threadgroup
-    // Assumes tgSize is power-of-two or handles leftover by ignoring out-of-range indices.
+    // Parallel reduction
     for (uint stride = tgSize >> 1; stride > 0; stride >>= 1) {
         if (tid < stride) {
             localVals[tid] += localVals[tid + stride];
@@ -177,6 +214,259 @@ kernel void scan_filter_sum_f32(const device float* target_col,
     if (tid == 0) {
         atomicAddF32Bits(out_sum_bits, localVals[0]);
     }
+}
+
+// Kernel: scan + filter + evaluate RPN expression + sum
+// Supports arithmetic expressions like l_extendedprice * (1 - l_discount)
+kernel void scan_filter_eval_sum(const device float* col0 [[buffer(0)]],
+                                  const device float* col1 [[buffer(1)]],
+                                  const device float* col2 [[buffer(2)]],
+                                  const device float* col3 [[buffer(3)]],
+                                  const device float* col4 [[buffer(4)]],
+                                  const device float* col5 [[buffer(5)]],
+                                  const device float* col6 [[buffer(6)]],
+                                  const device float* col7 [[buffer(7)]],
+                                  constant PredicateClause* clauses [[buffer(8)]],
+                                  constant ExprToken* expr_rpn [[buffer(9)]],
+                                  constant uint& col_count [[buffer(10)]],
+                                  constant uint& clause_count [[buffer(11)]],
+                                  constant uint& expr_length [[buffer(12)]],
+                                  constant uint& row_count [[buffer(13)]],
+                                  device atomic_uint* out_sum_bits [[buffer(14)]],
+                                  uint gid [[thread_position_in_grid]],
+                                  uint tid [[thread_index_in_threadgroup]],
+                                  uint tgSize [[threads_per_threadgroup]]) {
+    if (gid >= row_count) return;
+    if (tgSize > 1024) tgSize = 1024;
+    threadgroup float localVals[1024];
+    
+    const device float* cols[8] = {col0, col1, col2, col3, col4, col5, col6, col7};
+    
+    // Evaluate predicates first
+    bool passes = true;
+    for (uint c = 0; c < clause_count && passes; ++c) {
+        PredicateClause pc = clauses[c];
+        if (pc.colIndex >= col_count) { passes = false; break; }
+        
+        float col_val = cols[pc.colIndex][gid];
+        
+        if (pc.isDate) {
+            int date_val = as_type<int>(col_val);
+            int date_lit = (int)(pc.value & 0xFFFFFFFFull);
+            switch (pc.op) {
+                case 0: passes = date_val < date_lit; break;
+                case 1: passes = date_val <= date_lit; break;
+                case 2: passes = date_val > date_lit; break;
+                case 3: passes = date_val >= date_lit; break;
+                case 4: passes = date_val == date_lit; break;
+            }
+        } else {
+            union { uint32_t u; float f; } conv;
+            conv.u = (uint32_t)(pc.value & 0xFFFFFFFFull);
+            float lit = conv.f;
+            switch (pc.op) {
+                case 0: passes = col_val < lit; break;
+                case 1: passes = col_val <= lit; break;
+                case 2: passes = col_val > lit; break;
+                case 3: passes = col_val >= lit; break;
+                case 4: passes = col_val == lit; break;
+            }
+        }
+    }
+    
+    float result_val = 0.0f;
+    if (passes) {
+        // Evaluate RPN expression using stack
+        float stack[32];  // Support expressions up to 32 tokens deep
+        uint sp = 0;
+        
+        for (uint i = 0; i < expr_length; ++i) {
+            ExprToken tok = expr_rpn[i];
+            if (tok.type == 0) {
+                // Column reference
+                if (tok.colIndex < col_count && sp < 32) {
+                    stack[sp++] = cols[tok.colIndex][gid];
+                }
+            } else if (tok.type == 1) {
+                // Literal
+                if (sp < 32) {
+                    stack[sp++] = tok.literal;
+                }
+            } else if (tok.type == 2) {
+                // Operator - pop two operands, apply, push result
+                if (sp >= 2) {
+                    float b = stack[--sp];
+                    float a = stack[--sp];
+                    float res = 0.0f;
+                    switch (tok.op) {
+                        case 0: res = a + b; break;  // ADD
+                        case 1: res = a - b; break;  // SUB
+                        case 2: res = a * b; break;  // MUL
+                        case 3: res = (b != 0.0f) ? a / b : 0.0f; break;  // DIV
+                    }
+                    if (sp < 32) {
+                        stack[sp++] = res;
+                    }
+                }
+            }
+        }
+        
+        // Final result is top of stack
+        if (sp > 0) {
+            result_val = stack[sp - 1];
+        }
+    }
+    
+    localVals[tid] = result_val;
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    
+    // Parallel reduction
+    for (uint stride = tgSize >> 1; stride > 0; stride >>= 1) {
+        if (tid < stride) {
+            localVals[tid] += localVals[tid + stride];
+        }
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+    }
+    if (tid == 0) {
+        atomicAddF32Bits(out_sum_bits, localVals[0]);
+    }
+}
+
+// Simple bitonic sort kernel for small arrays (ORDER BY support)
+// For production use, implement radix sort or thrust-style parallel sort
+kernel void bitonic_sort_step(device float* data [[buffer(0)]],
+                               device uint* indices [[buffer(1)]],
+                               constant uint& stage [[buffer(2)]],
+                               constant uint& pass [[buffer(3)]],
+                               constant uint& count [[buffer(4)]],
+                               uint gid [[thread_position_in_grid]]) {
+    uint pairDist = 1 << (stage - pass);
+    uint blockWidth = 2 * pairDist;
+    uint leftId = (gid % pairDist) + (gid / pairDist) * blockWidth;
+    uint rightId = leftId + pairDist;
+    
+    if (rightId >= count) return;
+    
+    float leftVal = data[leftId];
+    float rightVal = data[rightId];
+    bool ascending = ((leftId / (1 << stage)) % 2) == 0;
+    
+    if ((leftVal > rightVal) == ascending) {
+        // Swap
+        data[leftId] = rightVal;
+        data[rightId] = leftVal;
+        uint tmpIdx = indices[leftId];
+        indices[leftId] = indices[rightId];
+        indices[rightId] = tmpIdx;
+    }
+}
+
+// LIMIT kernel: copy first N elements
+kernel void limit_copy(const device float* input [[buffer(0)]],
+                       device float* output [[buffer(1)]],
+                       constant uint& limit [[buffer(2)]],
+                       uint gid [[thread_position_in_grid]]) {
+    if (gid < limit) {
+        output[gid] = input[gid];
+    }
+}
+
+// Multi-key GROUP BY with aggregation
+// Simplified version for single uint32 key
+kernel void groupby_agg_single_key(const device uint* keys [[buffer(0)]],
+                                    const device float* values [[buffer(1)]],
+                                    device atomic_uint* ht_keys [[buffer(2)]],
+                                    device atomic_uint* ht_counts [[buffer(3)]],
+                                    device atomic_uint* ht_sum_bits [[buffer(4)]],
+                                    constant uint& capacity [[buffer(5)]],
+                                    constant uint& row_count [[buffer(6)]],
+                                    uint gid [[thread_position_in_grid]]) {
+    if (gid >= row_count) return;
+    
+    uint key = keys[gid];
+    float val = values[gid];
+    
+    // Simple hash to slot
+    uint slot = key % capacity;
+    
+    // Atomic insert/update (simplified, no collision handling)
+    atomic_store_explicit(&ht_keys[slot], key, memory_order_relaxed);
+    atomic_fetch_add_explicit(&ht_counts[slot], 1u, memory_order_relaxed);
+    atomicAddF32Bits(&ht_sum_bits[slot], val);
+}
+
+// Hash join: Build phase
+kernel void hash_join_build(const device uint* keys [[buffer(0)]],
+                             const device uint* payloads [[buffer(1)]],
+                             device atomic_uint* ht_keys [[buffer(2)]],
+                             device atomic_uint* ht_payloads [[buffer(3)]],
+                             constant uint& capacity [[buffer(4)]],
+                             constant uint& build_count [[buffer(5)]],
+                             uint gid [[thread_position_in_grid]]) {
+    if (gid >= build_count) return;
+    
+    uint key = keys[gid];
+    uint payload = payloads[gid];
+    uint slot = key % capacity;
+    
+    // Linear probing to find empty slot
+    for (uint i = 0; i < capacity; ++i) {
+        uint probe_slot = (slot + i) % capacity;
+        uint expected = 0;  // Empty slot marker
+        
+        // Try to claim this slot atomically
+        if (atomic_compare_exchange_weak_explicit(&ht_keys[probe_slot], &expected, key,
+                                                   memory_order_relaxed, memory_order_relaxed)) {
+            // Successfully claimed slot, write payload
+            atomic_store_explicit(&ht_payloads[probe_slot], payload, memory_order_relaxed);
+            return;
+        }
+        
+        // If slot has same key (duplicate), just update payload and return
+        if (atomic_load_explicit(&ht_keys[probe_slot], memory_order_relaxed) == key) {
+            atomic_store_explicit(&ht_payloads[probe_slot], payload, memory_order_relaxed);
+            return;
+        }
+    }
+}
+
+// Hash join: Probe phase
+kernel void hash_join_probe(const device uint* probe_keys [[buffer(0)]],
+                             const device uint* ht_keys [[buffer(1)]],
+                             const device uint* ht_payloads [[buffer(2)]],
+                             device uint* output_matches [[buffer(3)]],
+                             device uint* output_payloads [[buffer(4)]],
+                             constant uint& capacity [[buffer(5)]],
+                             constant uint& probe_count [[buffer(6)]],
+                             uint gid [[thread_position_in_grid]]) {
+    if (gid >= probe_count) return;
+    
+    uint key = probe_keys[gid];
+    uint slot = key % capacity;
+    
+    // Linear probing to find matching key
+    for (uint i = 0; i < capacity; ++i) {
+        uint probe_slot = (slot + i) % capacity;
+        uint ht_key = atomic_load_explicit((device atomic_uint*)&ht_keys[probe_slot], memory_order_relaxed);
+        
+        if (ht_key == key) {
+            // Match found
+            output_matches[gid] = 1;
+            output_payloads[gid] = atomic_load_explicit((device atomic_uint*)&ht_payloads[probe_slot], memory_order_relaxed);
+            return;
+        }
+        
+        if (ht_key == 0) {
+            // Empty slot found, key doesn't exist in hash table
+            output_matches[gid] = 0;
+            output_payloads[gid] = 0;
+            return;
+        }
+    }
+    
+    // Shouldn't reach here unless table is completely full
+    output_matches[gid] = 0;
+    output_payloads[gid] = 0;
 }
 
 } // namespace ops

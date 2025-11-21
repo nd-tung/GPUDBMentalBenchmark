@@ -11,6 +11,7 @@
 #include "PipelineBuilder.hpp"
 #include "Executor.hpp"
 #include "GpuExecutor.hpp"
+#include "JoinExecutor.hpp"
 #include "ExprEval.hpp"
 
 static std::string g_dataset_path = "Data/SF-1/";
@@ -54,6 +55,49 @@ static void runEngineSQL(const std::string& sql) {
     using namespace engine;
     std::cout << "--- Running (Engine Host) ---" << std::endl;
     Plan plan = Planner::fromSQL(sql);
+    
+    // Check for JOIN queries
+    bool hasJoin = false;
+    std::string leftTable, rightTable;
+    for (const auto& n : plan.nodes) {
+        if (n.type == IRNode::Type::Join) {
+            hasJoin = true;
+            rightTable = n.join.rightTable;
+        }
+        if (n.type == IRNode::Type::Scan) {
+            if (leftTable.empty()) leftTable = n.scan.table;
+        }
+    }
+    
+    bool want_gpu = (std::getenv("GPUDB_USE_GPU")!=nullptr);
+    
+    // Handle JOIN queries
+    if (hasJoin && want_gpu) {
+        // Extract join key columns and aggregation target
+        std::string leftKey = "l_orderkey";   // Default for lineitem-orders join
+        std::string rightKey = "o_orderkey";
+        std::string aggCol = "l_extendedprice";
+        
+        // Parse from plan if available
+        for (const auto& n : plan.nodes) {
+            if (n.type == IRNode::Type::Aggregate) {
+                aggCol = n.aggregate.expr;
+            }
+        }
+        
+        if (JoinExecutor::isEligible(leftTable, rightTable)) {
+            auto joinRes = JoinExecutor::runHashJoin(g_dataset_path, leftTable, rightTable, 
+                                                     leftKey, rightKey, aggCol);
+            std::cout << "Result:" << std::endl;
+            std::cout << "JOIN SUM (GPU): " << std::fixed << std::setprecision(2) << joinRes.revenue << std::endl;
+            printf("Matched rows: %u\n", joinRes.match_count);
+            printf("Upload time: %0.2f ms\n", joinRes.upload_ms);
+            printf("GPU kernel time: %0.2f ms\n", joinRes.gpu_ms);
+            return;
+        }
+    }
+    
+    // Non-join path
     bool use_q6 = false;
     std::string pred; std::string aggexpr; std::string table="lineitem";
     for (const auto& n : plan.nodes) {
@@ -71,7 +115,6 @@ static void runEngineSQL(const std::string& sql) {
         lowAgg.find("discount")!=std::string::npos) {
         use_q6 = true;
     }
-    bool want_gpu = (std::getenv("GPUDB_USE_GPU")!=nullptr);
     if (use_q6) {
         auto spec = PipelineBuilder::buildQ6(plan);
         auto result = Executor::runQ6(spec, g_dataset_path);

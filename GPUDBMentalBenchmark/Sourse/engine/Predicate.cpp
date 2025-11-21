@@ -39,7 +39,10 @@ std::vector<Clause> parse_predicate(const std::string& predicate, const ExistsFn
 }
 
 static bool cmp_num(double l, CompOp op, double r) {
-    switch(op){case CompOp::LT: return l<r; case CompOp::LE: return l<=r; case CompOp::GT: return l>r; case CompOp::GE: return l>=r; case CompOp::EQ: return l==r;} return false;
+    // Cast to float32 for consistent precision with GPU evaluation
+    float lf = static_cast<float>(l);
+    float rf = static_cast<float>(r);
+    switch(op){case CompOp::LT: return lf<rf; case CompOp::LE: return lf<=rf; case CompOp::GT: return lf>rf; case CompOp::GE: return lf>=rf; case CompOp::EQ: return lf==rf;} return false;
 }
 static bool cmp_int(long long l, CompOp op, long long r) {
     switch(op){case CompOp::LT: return l<r; case CompOp::LE: return l<=r; case CompOp::GT: return l>r; case CompOp::GE: return l>=r; case CompOp::EQ: return l==r;} return false;

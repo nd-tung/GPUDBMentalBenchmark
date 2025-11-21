@@ -22,6 +22,22 @@ static std::vector<float> loadFloatColumn(const std::string& filePath, int colum
     } return data;
 }
 
+static std::vector<float> loadDateColumnAsFloat(const std::string& filePath, int columnIndex) {
+    // Load date column and store YYYYMMDD integer as float bits for GPU
+    std::vector<float> data; std::ifstream file(filePath); if (!file.is_open()) return data; std::string line;
+    while (std::getline(file, line)) { std::string token; int col=0; size_t s=0,e=line.find('|');
+        while (e!=std::string::npos) { if (col==columnIndex) {
+            token=line.substr(s,e-s);
+            token.erase(std::remove(token.begin(), token.end(), '-'), token.end());
+            int date_int = std::stoi(token);
+            union { int i; float f; } conv; conv.i = date_int;
+            data.push_back(conv.f);  // Store int bits as float
+            break;
+        }
+        s=e+1; e=line.find('|', s); ++col; }
+    } return data;
+}
+
 bool GpuExecutor::isEligible(const std::string& aggFunc,
                              const std::vector<expr::Clause>& clauses,
                              const std::string& targetColumn) {
@@ -44,28 +60,71 @@ GPUResult GpuExecutor::runSum(const std::string& dataset_path,
                               const std::string& targetColumn,
                               const std::vector<expr::Clause>& clauses) {
     static const std::map<std::string,int> float_idx{{"l_quantity",4},{"l_extendedprice",5},{"l_discount",6}};
+    static const std::map<std::string,int> date_idx{{"l_shipdate",10}};
     std::string path = dataset_path + "lineitem.tbl";
+    
+    // Check if target is float or date column
     auto it = float_idx.find(targetColumn);
-    if (it==float_idx.end()) return {0.0,0.0,0.0};
-    auto colHost = loadFloatColumn(path, it->second);
+    auto date_it = date_idx.find(targetColumn);
+    if (it==float_idx.end() && date_it==date_idx.end()) return {0.0,0.0,0.0};
+    
+    std::vector<float> colHost;
+    if (it != float_idx.end()) {
+        colHost = loadFloatColumn(path, it->second);
+    } else {
+        colHost = loadDateColumnAsFloat(path, date_it->second);
+    }
     if (colHost.empty()) return {0.0,0.0,0.0};
 
-    // Stage column on GPU
+    // Collect all unique columns referenced in predicates and target
+    std::vector<std::string> neededCols;
+    std::map<std::string,uint32_t> colIndexMap;
+    neededCols.push_back(targetColumn);
+    colIndexMap[targetColumn] = 0;
+    for (const auto& c : clauses) {
+        if (colIndexMap.find(c.ident)==colIndexMap.end()) {
+            colIndexMap[c.ident] = static_cast<uint32_t>(neededCols.size());
+            neededCols.push_back(c.ident);
+        }
+    }
+
+    // Stage all columns on GPU
     auto uploadStart = std::chrono::high_resolution_clock::now();
     auto& store = ColumnStoreGPU::instance();
-    engine::GPUColumn* gpuCol = store.stageFloatColumn(targetColumn, colHost);
+    std::vector<engine::GPUColumn*> gpuCols;
+    for (const auto& col : neededCols) {
+        std::vector<float> hostData;
+        if (col==targetColumn) {
+            hostData = colHost;
+        } else {
+            auto colIt = float_idx.find(col);
+            auto dateIt = date_idx.find(col);
+            if (colIt != float_idx.end()) {
+                hostData = loadFloatColumn(path, colIt->second);
+            } else if (dateIt != date_idx.end()) {
+                hostData = loadDateColumnAsFloat(path, dateIt->second);
+            } else {
+                return {0.0,0.0,0.0};
+            }
+        }
+        if (hostData.empty()) return {0.0,0.0,0.0};
+        engine::GPUColumn* gc = store.stageFloatColumn(col, hostData);
+        gpuCols.push_back(gc);
+    }
     auto uploadEnd = std::chrono::high_resolution_clock::now();
     double upload_ms = std::chrono::duration<double, std::milli>(uploadEnd - uploadStart).count();
-    if (!gpuCol || !store.device() || !store.library()) {
+    if (gpuCols.empty() || !gpuCols[0] || !store.device() || !store.library()) {
         // Fallback CPU sum
         double sum=0.0; for (float v: colHost) sum += v; return {sum, 0.0, upload_ms};
     }
 
-    // Build predicate clause buffer (numeric only)
+    // Build predicate clause buffer with proper column indices
     std::vector<PredicateClausePacked> packed;
     packed.reserve(clauses.size());
     for (const auto& c : clauses) {
-        PredicateClausePacked pc{}; pc.colIndex = 0; pc.isDate = c.isDate ? 1u : 0u;
+        PredicateClausePacked pc{}; 
+        pc.colIndex = colIndexMap[c.ident]; 
+        pc.isDate = c.isDate ? 1u : 0u;
         switch (c.op) {
             case expr::CompOp::LT: pc.op = 0; break;
             case expr::CompOp::LE: pc.op = 1; break;
@@ -74,7 +133,7 @@ GPUResult GpuExecutor::runSum(const std::string& dataset_path,
             case expr::CompOp::EQ: pc.op = 4; break;
         }
         if (c.isDate) {
-            pc.value = static_cast<int64_t>(c.date); // future: date support in kernel
+            pc.value = static_cast<int64_t>(c.date);
         } else {
             union { float f; uint32_t u; } conv; conv.f = static_cast<float>(c.num);
             pc.value = static_cast<int64_t>(conv.u);
@@ -116,13 +175,23 @@ GPUResult GpuExecutor::runSum(const std::string& dataset_path,
     MTL::CommandBuffer* cmd = store.queue()->commandBuffer();
     MTL::ComputeCommandEncoder* enc = cmd->computeCommandEncoder();
     enc->setComputePipelineState(pipeline);
-    enc->setBuffer(gpuCol->buffer, 0, 0);
-    enc->setBuffer(predicateBuffer, 0, 1);
+    // Set column buffers at indices 0-7 (kernel expects up to 8 columns)
+    for (size_t i=0; i<gpuCols.size() && i<8; ++i) {
+        enc->setBuffer(gpuCols[i]->buffer, 0, i);
+    }
+    // Fill unused slots with first buffer (dummy, won't be accessed if col_count is correct)
+    for (size_t i=gpuCols.size(); i<8; ++i) {
+        enc->setBuffer(gpuCols[0]->buffer, 0, i);
+    }
+    // Predicates at buffer(8), parameters at 9-11, output at 12
+    enc->setBuffer(predicateBuffer, 0, 8);
+    uint32_t colCount = static_cast<uint32_t>(gpuCols.size());
     uint32_t clauseCount = static_cast<uint32_t>(packed.size());
-    uint32_t rowCount = static_cast<uint32_t>(gpuCol->count);
-    enc->setBytes(&clauseCount, sizeof(clauseCount), 2);
-    enc->setBytes(&rowCount, sizeof(rowCount), 3);
-    enc->setBuffer(outSumBuffer, 0, 4);
+    uint32_t rowCount = static_cast<uint32_t>(gpuCols[0]->count);
+    enc->setBytes(&colCount, sizeof(colCount), 9);
+    enc->setBytes(&clauseCount, sizeof(clauseCount), 10);
+    enc->setBytes(&rowCount, sizeof(rowCount), 11);
+    enc->setBuffer(outSumBuffer, 0, 12);
     // Threads
     NS::UInteger maxTG = pipeline->maxTotalThreadsPerThreadgroup();
     if (maxTG > rowCount) maxTG = rowCount;
