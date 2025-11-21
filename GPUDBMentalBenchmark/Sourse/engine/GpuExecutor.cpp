@@ -1,5 +1,6 @@
 #include "GpuExecutor.hpp"
 #include "ColumnStoreGPU.hpp"
+#include "Expression.hpp"
 #include <fstream>
 #include <string>
 #include <vector>
@@ -214,6 +215,196 @@ GPUResult GpuExecutor::runSum(const std::string& dataset_path,
     predicateBuffer->release();
     outSumBuffer->release();
 
+    return {revenue, gpu_ms, upload_ms};
+}
+
+// New kernel for expression evaluation
+static const char* KERNEL_SCAN_FILTER_EVAL_SUM = "ops::scan_filter_eval_sum";
+
+GPUResult GpuExecutor::runSumWithExpression(const std::string& dataset_path,
+                                            const std::string& expression,
+                                            const std::vector<expr::Clause>& clauses) {
+    // Parse expression
+    expr::ParsedExpression parsed;
+    try {
+        parsed = expr::ParsedExpression::parse(expression);
+    } catch (const std::exception& e) {
+        std::cerr << "[GPU] Expression parse error: " << e.what() << std::endl;
+        return {0.0, 0.0, 0.0};
+    }
+    
+    static const std::map<std::string,int> float_idx{{"l_quantity",4},{"l_extendedprice",5},{"l_discount",6},{"l_tax",7}};
+    static const std::map<std::string,int> date_idx{{"l_shipdate",10}};
+    std::string path = dataset_path + "lineitem.tbl";
+    
+    // Collect all unique columns referenced (expression + predicates)
+    std::vector<std::string> neededCols = parsed.columns;
+    std::map<std::string,uint32_t> colIndexMap;
+    for (size_t i=0; i<neededCols.size(); ++i) {
+        colIndexMap[neededCols[i]] = static_cast<uint32_t>(i);
+    }
+    
+    // Add predicate columns
+    for (const auto& c : clauses) {
+        if (colIndexMap.find(c.ident)==colIndexMap.end()) {
+            colIndexMap[c.ident] = static_cast<uint32_t>(neededCols.size());
+            neededCols.push_back(c.ident);
+        }
+    }
+    
+    // Load all columns
+    auto uploadStart = std::chrono::high_resolution_clock::now();
+    auto& store = ColumnStoreGPU::instance();
+    std::vector<engine::GPUColumn*> gpuCols;
+    uint32_t rowCount = 0;
+    
+    for (const auto& col : neededCols) {
+        std::vector<float> hostData;
+        auto colIt = float_idx.find(col);
+        auto dateIt = date_idx.find(col);
+        if (colIt != float_idx.end()) {
+            hostData = loadFloatColumn(path, colIt->second);
+        } else if (dateIt != date_idx.end()) {
+            hostData = loadDateColumnAsFloat(path, dateIt->second);
+        } else {
+            std::cerr << "[GPU] Unknown column: " << col << std::endl;
+            return {0.0,0.0,0.0};
+        }
+        if (hostData.empty()) return {0.0,0.0,0.0};
+        if (rowCount == 0) rowCount = static_cast<uint32_t>(hostData.size());
+        engine::GPUColumn* gc = store.stageFloatColumn(col, hostData);
+        gpuCols.push_back(gc);
+    }
+    auto uploadEnd = std::chrono::high_resolution_clock::now();
+    double upload_ms = std::chrono::duration<double, std::milli>(uploadEnd - uploadStart).count();
+    
+    if (gpuCols.empty() || !store.device() || !store.library()) {
+        return {0.0, 0.0, upload_ms};
+    }
+    
+    // Build predicate clause buffer
+    std::vector<PredicateClausePacked> packed;
+    packed.reserve(clauses.size());
+    for (const auto& c : clauses) {
+        PredicateClausePacked pc{}; 
+        pc.colIndex = colIndexMap[c.ident]; 
+        pc.isDate = c.isDate ? 1u : 0u;
+        switch (c.op) {
+            case expr::CompOp::LT: pc.op = 0; break;
+            case expr::CompOp::LE: pc.op = 1; break;
+            case expr::CompOp::GT: pc.op = 2; break;
+            case expr::CompOp::GE: pc.op = 3; break;
+            case expr::CompOp::EQ: pc.op = 4; break;
+        }
+        if (c.isDate) {
+            pc.value = static_cast<int64_t>(c.date);
+        } else {
+            union { float f; uint32_t u; } conv; conv.f = static_cast<float>(c.num);
+            pc.value = static_cast<int64_t>(conv.u);
+        }
+        packed.push_back(pc);
+    }
+    MTL::Buffer* predicateBuffer;
+    if (packed.empty()) {
+        // Create empty buffer
+        predicateBuffer = store.device()->newBuffer(sizeof(PredicateClausePacked), MTL::ResourceStorageModeShared);
+    } else {
+        predicateBuffer = store.device()->newBuffer(packed.data(), 
+                                                    packed.size()*sizeof(PredicateClausePacked), 
+                                                    MTL::ResourceStorageModeShared);
+    }
+    
+    // Build expression RPN buffer
+    MTL::Buffer* exprBuffer;
+    if (parsed.rpn.empty()) {
+        exprBuffer = store.device()->newBuffer(sizeof(expr::ExprToken), MTL::ResourceStorageModeShared);
+    } else {
+        exprBuffer = store.device()->newBuffer(parsed.rpn.data(),
+                                               parsed.rpn.size()*sizeof(expr::ExprToken),
+                                               MTL::ResourceStorageModeShared);
+    }
+    
+    // Output atomic sum
+    auto outSumBuffer = store.device()->newBuffer(sizeof(uint32_t), MTL::ResourceStorageModeShared);
+    std::memset(outSumBuffer->contents(), 0, sizeof(uint32_t));
+    
+    // Acquire function & pipeline
+    static MTL::ComputePipelineState* pipeline = nullptr;
+    if (!pipeline) {
+        NS::Error* error = nullptr;
+        auto fnName = NS::String::string(KERNEL_SCAN_FILTER_EVAL_SUM, NS::UTF8StringEncoding);
+        MTL::Function* fn = store.library()->newFunction(fnName);
+        if (!fn) {
+            fnName->release(); fnName = NS::String::string("scan_filter_eval_sum", NS::UTF8StringEncoding);
+            fn = store.library()->newFunction(fnName);
+        }
+        if (!fn) {
+            std::cerr << "[GPU] Kernel not found: scan_filter_eval_sum" << std::endl;
+            fnName->release();
+            predicateBuffer->release();
+            exprBuffer->release();
+            outSumBuffer->release();
+            return {0.0,0.0,upload_ms};
+        }
+        pipeline = store.device()->newComputePipelineState(fn, &error);
+        fn->release(); fnName->release();
+        if (!pipeline) {
+            if (error) std::cerr << "[GPU] Pipeline error: " << error->localizedDescription()->utf8String() << std::endl;
+            predicateBuffer->release();
+            exprBuffer->release();
+            outSumBuffer->release();
+            return {0.0,0.0,upload_ms};
+        }
+    }
+    
+    // Encode and dispatch
+    auto kernelStart = std::chrono::high_resolution_clock::now();
+    MTL::CommandBuffer* cmd = store.queue()->commandBuffer();
+    MTL::ComputeCommandEncoder* enc = cmd->computeCommandEncoder();
+    enc->setComputePipelineState(pipeline);
+    
+    // Set column buffers at indices 0-7
+    for (size_t i=0; i<gpuCols.size() && i<8; ++i) {
+        enc->setBuffer(gpuCols[i]->buffer, 0, i);
+    }
+    for (size_t i=gpuCols.size(); i<8; ++i) {
+        enc->setBuffer(gpuCols[0]->buffer, 0, i);  // dummy fill
+    }
+    
+    // Predicates at buffer(8), expr_rpn at buffer(9), parameters at 10-13, output at 14
+    enc->setBuffer(predicateBuffer, 0, 8);
+    enc->setBuffer(exprBuffer, 0, 9);
+    uint32_t colCount = static_cast<uint32_t>(gpuCols.size());
+    uint32_t clauseCount = static_cast<uint32_t>(packed.size());
+    uint32_t exprLength = static_cast<uint32_t>(parsed.rpn.size());
+    enc->setBytes(&colCount, sizeof(colCount), 10);
+    enc->setBytes(&clauseCount, sizeof(clauseCount), 11);
+    enc->setBytes(&exprLength, sizeof(exprLength), 12);
+    enc->setBytes(&rowCount, sizeof(rowCount), 13);
+    enc->setBuffer(outSumBuffer, 0, 14);
+    
+    // Threads
+    NS::UInteger maxTG = pipeline->maxTotalThreadsPerThreadgroup();
+    if (maxTG > rowCount) maxTG = rowCount;
+    MTL::Size gridSize = MTL::Size::Make(rowCount, 1, 1);
+    MTL::Size tgSize = MTL::Size::Make(maxTG, 1, 1);
+    enc->dispatchThreads(gridSize, tgSize);
+    enc->endEncoding();
+    cmd->commit(); cmd->waitUntilCompleted();
+    auto kernelEnd = std::chrono::high_resolution_clock::now();
+    double gpu_ms = (cmd->GPUEndTime() - cmd->GPUStartTime()) * 1000.0;
+    if (gpu_ms <= 0.0) gpu_ms = std::chrono::duration<double, std::milli>(kernelEnd - kernelStart).count();
+    
+    // Read back
+    uint32_t sumBits = *reinterpret_cast<uint32_t*>(outSumBuffer->contents());
+    union { uint32_t u; float f; } conv; conv.u = sumBits;
+    double revenue = static_cast<double>(conv.f);
+    
+    // Release temp buffers
+    predicateBuffer->release();
+    exprBuffer->release();
+    outSumBuffer->release();
+    
     return {revenue, gpu_ms, upload_ms};
 }
 

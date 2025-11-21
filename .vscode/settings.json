@@ -1,6 +1,7 @@
 {
     "files.associations": {
         "regex": "cpp",
-        "string": "cpp"
+        "string": "cpp",
+        "map": "cpp"
     }
 }

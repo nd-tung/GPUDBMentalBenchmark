@@ -107,7 +107,13 @@ static void runEngineSQL(const std::string& sql) {
     }
     std::string lowPred = pred; std::transform(lowPred.begin(), lowPred.end(), lowPred.begin(), ::tolower);
     std::string lowAgg = aggexpr; std::transform(lowAgg.begin(), lowAgg.end(), lowAgg.begin(), ::tolower);
+    // Check if aggexpr has arithmetic operators (if so, use generic path with expressions)
+    bool hasArithmeticOps = (lowAgg.find('*') != std::string::npos || 
+                             lowAgg.find('/') != std::string::npos ||
+                             lowAgg.find('+') != std::string::npos ||
+                             lowAgg.find('-') != std::string::npos);
     if (table=="lineitem" &&
+        !hasArithmeticOps &&  // Disable Q6 if expressions present
         lowPred.find("shipdate")!=std::string::npos &&
         lowPred.find("discount")!=std::string::npos &&
         lowPred.find("quantity")!=std::string::npos &&
@@ -125,7 +131,10 @@ static void runEngineSQL(const std::string& sql) {
         printf("Total TPC-H Q6 wall-clock: %0.2f ms\n", result.cpu_ms);
     } else {
         // Extract aggregate info
-        std::string aggFunc; std::string aggExpr; for (auto& n: plan.nodes) if(n.type==engine::IRNode::Type::Aggregate){ aggFunc=n.aggregate.func; aggExpr=n.aggregate.expr; }
+        std::string aggFunc; std::string aggExpr; bool hasExpression = false;
+        for (auto& n: plan.nodes) if(n.type==engine::IRNode::Type::Aggregate){ 
+            aggFunc=n.aggregate.func; aggExpr=n.aggregate.expr; hasExpression=n.aggregate.hasExpression;
+        }
         // Very simple target ident (fast path) if single ident RPN
         std::string targetIdent;
         {
@@ -137,9 +146,26 @@ static void runEngineSQL(const std::string& sql) {
         std::string predicate; for (auto& n: plan.nodes) if(n.type==engine::IRNode::Type::Filter) predicate=n.filter.predicate;
         auto exists = [](const std::string&){ return true; };
         auto clauses = engine::expr::parse_predicate(predicate, exists);
-        bool gpuEligible = want_gpu && !targetIdent.empty() && engine::GpuExecutor::isEligible(aggFunc, clauses, targetIdent);
+        
+        // Check if GPU can handle this query
+        bool gpuEligible = false;
+        if (want_gpu && aggFunc == "sum") {
+            if (hasExpression) {
+                // Expression path (e.g., l_extendedprice * (1 - l_discount))
+                gpuEligible = true;
+            } else if (!targetIdent.empty()) {
+                // Simple column path
+                gpuEligible = engine::GpuExecutor::isEligible(aggFunc, clauses, targetIdent);
+            }
+        }
+        
         if (gpuEligible) {
-            auto gpuRes = engine::GpuExecutor::runSum(g_dataset_path, targetIdent, clauses);
+            engine::GPUResult gpuRes;
+            if (hasExpression) {
+                gpuRes = engine::GpuExecutor::runSumWithExpression(g_dataset_path, aggExpr, clauses);
+            } else {
+                gpuRes = engine::GpuExecutor::runSum(g_dataset_path, targetIdent, clauses);
+            }
             std::cout << "Result:" << std::endl;
             std::cout << "Scalar SUM (GPU): " << std::fixed << std::setprecision(2) << gpuRes.revenue << std::endl;
             printf("Upload time: %0.2f ms\n", gpuRes.upload_ms);

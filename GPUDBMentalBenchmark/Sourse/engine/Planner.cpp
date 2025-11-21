@@ -166,15 +166,38 @@ Plan Planner::fromSQL(const std::string& sql) {
             IRNode s; s.type = IRNode::Type::Scan; s.scan.table = table; p.nodes.push_back(s);
         }
         
-        // Fallback minimal regex extraction
-        std::regex re_sum(R"(select\s+sum\s*\(([^\)]+)\))", std::regex::icase);
-        std::smatch m; if (std::regex_search(sql, m, re_sum) && m.size()>1) aggexpr = m[1].str();
+        // Fallback minimal regex extraction with nested parentheses handling
+        std::regex re_sum(R"(select\s+sum\s*\()", std::regex::icase);
+        std::smatch m;
+        if (std::regex_search(sql, m, re_sum)) {
+            // Find matching closing parenthesis
+            size_t start = m.position() + m.length();
+            int depth = 1;
+            size_t end = start;
+            for (size_t i = start; i < sql.size() && depth > 0; ++i) {
+                if (sql[i] == '(') depth++;
+                else if (sql[i] == ')') {
+                    depth--;
+                    if (depth == 0) {
+                        end = i;
+                        break;
+                    }
+                }
+            }
+            aggexpr = sql.substr(start, end - start);
+        }
         std::regex re_where(R"(where\s+(.+))", std::regex::icase);
         if (std::regex_search(sql, m, re_where) && m.size()>1) predicate = m[1].str();
         if (aggexpr.empty()) aggexpr = "l_extendedprice";
         
         if (!predicate.empty()) { IRNode f; f.type = IRNode::Type::Filter; f.filter.predicate = predicate; p.nodes.push_back(f); }
-        IRNode a; a.type = IRNode::Type::Aggregate; a.aggregate.func = "sum"; a.aggregate.expr = aggexpr; p.nodes.push_back(a);
+        IRNode a; a.type = IRNode::Type::Aggregate; a.aggregate.func = "sum"; a.aggregate.expr = aggexpr;
+        // Check if expression contains arithmetic operators
+        a.aggregate.hasExpression = (aggexpr.find('*') != std::string::npos || 
+                                     aggexpr.find('/') != std::string::npos ||
+                                     aggexpr.find('+') != std::string::npos ||
+                                     aggexpr.find('-') != std::string::npos);
+        p.nodes.push_back(a);
     }
     // Ensure order Scan -> Join/Filter -> Aggregate
     std::vector<IRNode> ordered;

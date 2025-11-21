@@ -7,8 +7,9 @@ namespace engine {
 struct IRScan { std::string table; };
 struct IRFilter { std::string predicate; };
 struct IRAggregate { 
-    std::string func;  // e.g., "sum", "count", "avg"
-    std::string expr;  // expression to aggregate
+    std::string func;       // e.g., "sum", "count", "avg"
+    std::string expr;       // expression to aggregate (raw string)
+    bool hasExpression = false;  // true if expr contains arithmetic operations
 };
 struct IRProject {
     std::vector<std::string> columns;  // SELECT list columns

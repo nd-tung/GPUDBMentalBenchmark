@@ -18,6 +18,11 @@ public:
     static GPUResult runSum(const std::string& dataset_path,
                             const std::string& targetColumn,
                             const std::vector<expr::Clause>& clauses);
+    
+    // Run SUM with arithmetic expression (e.g., l_extendedprice * (1 - l_discount))
+    static GPUResult runSumWithExpression(const std::string& dataset_path,
+                                          const std::string& expression,
+                                          const std::vector<expr::Clause>& clauses);
 };
 
 } // namespace engine
