@@ -2,6 +2,7 @@
 #include "ExprEval.hpp" // for parse_date_yyyymmdd
 #include <regex>
 #include <cctype>
+#include <iostream>
 
 namespace engine::expr {
 
@@ -25,15 +26,38 @@ static bool parse_single(const std::string& clause, Clause& out, const ExistsFn&
 
 std::vector<Clause> parse_predicate(const std::string& predicate, const ExistsFn& exists) {
     std::vector<Clause> out; if (predicate.empty()) return out;
-    std::regex delim("\\s+and\\s+", std::regex::icase);
-    std::sregex_token_iterator it(predicate.begin(), predicate.end(), delim, -1), end;
-    for (; it!=end; ++it) {
-        std::string s = it->str();
+    
+    // Split by both AND and OR, keeping track of which delimiter was used
+    std::regex delim("\\s+(and|or)\\s+", std::regex::icase);
+    std::sregex_token_iterator it(predicate.begin(), predicate.end(), delim, {-1, 1}), end;
+    
+    std::vector<std::string> tokens;
+    for (; it != end; ++it) {
+        if (!it->str().empty()) tokens.push_back(it->str());
+    }
+    
+    for (size_t i = 0; i < tokens.size(); ++i) {
+        std::string s = tokens[i];
         auto l = s.find_first_not_of(" \t\n\r");
         auto r = s.find_last_not_of(" \t\n\r");
-        if (l==std::string::npos) continue;
-        s = s.substr(l, r-l+1);
-        Clause c; if (parse_single(s, c, exists)) out.push_back(c);
+        if (l == std::string::npos) continue;
+        s = s.substr(l, r - l + 1);
+        
+        // Check if this is a delimiter (AND/OR)
+        std::string lower = s;
+        for (char& ch : lower) ch = static_cast<char>(std::tolower(static_cast<unsigned char>(ch)));
+        if (lower == "and" || lower == "or") {
+            // Mark the previous clause as OR'd with the next if this is OR
+            if (lower == "or" && !out.empty()) {
+                out.back().isOrNext = true;
+            }
+        } else {
+            // This is a comparison clause
+            Clause c;
+            if (parse_single(s, c, exists)) {
+                out.push_back(c);
+            }
+        }
     }
     return out;
 }
@@ -52,16 +76,42 @@ bool eval_predicate(const std::vector<Clause>& clauses,
                     std::size_t rowIndex,
                     const RowGetter& getFloatLike,
                     const IntGetter& getIntLike) {
-    for (const auto& c : clauses) {
+    if (clauses.empty()) return true;
+    
+    // Evaluate clauses with OR/AND logic
+    // Group consecutive clauses connected by OR, evaluate groups with AND
+    bool groupResult = true;
+    bool finalResult = true;
+    
+    for (size_t i = 0; i < clauses.size(); ++i) {
+        const auto& c = clauses[i];
+        bool clauseResult;
+        
         if (c.isDate) {
             long long l = getIntLike(rowIndex, c.ident);
-            if (!cmp_int(l, c.op, c.date)) return false;
+            clauseResult = cmp_int(l, c.op, c.date);
         } else {
             double l = getFloatLike(rowIndex, c.ident);
-            if (!cmp_num(l, c.op, c.num)) return false;
+            clauseResult = cmp_num(l, c.op, c.num);
+        }
+        
+        if (i == 0) {
+            // First clause
+            groupResult = clauseResult;
+        } else if (clauses[i-1].isOrNext) {
+            // Previous clause was OR'd with this one
+            groupResult = groupResult || clauseResult;
+        } else {
+            // Previous clause was AND'd with this one - finish previous group
+            finalResult = finalResult && groupResult;
+            if (!finalResult) return false; // Short circuit
+            groupResult = clauseResult;
         }
     }
-    return true;
+    
+    // Don't forget the last group
+    finalResult = finalResult && groupResult;
+    return finalResult;
 }
 
 } // namespace engine::expr

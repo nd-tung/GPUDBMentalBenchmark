@@ -18,11 +18,12 @@ struct Clause {
     bool isDate = false;    // true if RHS was a DATE literal
     double num = 0.0;       // numeric literal (if !isDate)
     long long date = 0;     // date literal encoded as YYYYMMDD (if isDate)
+    bool isOrNext = false;  // true if the NEXT clause is OR'd with this one (not AND'd)
 };
 
-// Parse a conjunction of simple comparisons separated by AND.
+// Parse comparisons separated by AND/OR.
 // Supports: <, <=, >, >=, = with numeric literals or DATE 'YYYY-MM-DD'
-// Returns vector of Clause; if a comparison cannot be parsed it is skipped.
+// Returns vector of Clause with isOrNext flags; if a comparison cannot be parsed it is skipped.
 std::vector<Clause> parse_predicate(const std::string& predicate, const ExistsFn& exists);
 
 // Evaluate already parsed clauses for a given row using provided accessors.

@@ -55,6 +55,7 @@ struct PredicateClausePacked {
     uint32_t colIndex; // always 0 for now (single column kernel)
     uint32_t op;       // 0..4
     uint32_t isDate;   // 0 numeric, 1 date
+    uint32_t isOrNext; // 0 AND with next, 1 OR with next
     int64_t value;     // lower 32 bits store float literal bits
 };
 
@@ -63,6 +64,7 @@ struct PredicateClause {
     uint32_t colIndex;
     uint32_t op;
     uint32_t isDate;
+    uint32_t isOrNext;
     int64_t value;
 };
 
@@ -135,6 +137,7 @@ GPUResult GpuExecutor::runSum(const std::string& dataset_path,
         PredicateClausePacked pc{}; 
         pc.colIndex = colIndexMap[c.ident]; 
         pc.isDate = c.isDate ? 1u : 0u;
+        pc.isOrNext = c.isOrNext ? 1u : 0u;
         switch (c.op) {
             case expr::CompOp::LT: pc.op = 0; break;
             case expr::CompOp::LE: pc.op = 1; break;
@@ -298,6 +301,7 @@ GPUResult GpuExecutor::runSumWithExpression(const std::string& dataset_path,
         PredicateClausePacked pc{}; 
         pc.colIndex = colIndexMap[c.ident]; 
         pc.isDate = c.isDate ? 1u : 0u;
+        pc.isOrNext = c.isOrNext ? 1u : 0u;
         switch (c.op) {
             case expr::CompOp::LT: pc.op = 0; break;
             case expr::CompOp::LE: pc.op = 1; break;
@@ -492,6 +496,7 @@ GPUResult GpuExecutor::runAggregate(const std::string& dataset_path,
         pc.colIndex = colMap[cl.ident];
         pc.op = static_cast<uint32_t>(cl.op);
         pc.isDate = cl.isDate ? 1u : 0u;
+        pc.isOrNext = cl.isOrNext ? 1u : 0u;
         
         if (pc.isDate) {
             pc.value = cl.date;

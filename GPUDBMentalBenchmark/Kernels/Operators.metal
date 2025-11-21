@@ -126,6 +126,7 @@ struct PredicateClause {
     uint colIndex;   // Column index among provided buffers
     uint op;         // 0:LT 1:LE 2:GT 3:GE 4:EQ
     uint isDate;     // 0 numeric 1 date/int
+    uint isOrNext;   // 0 next clause is AND'd, 1 next clause is OR'd
     int64_t value;   // encoded literal (date as YYYYMMDD or bitcasted double via int64)
 };
 
@@ -167,24 +168,28 @@ kernel void scan_filter_sum_f32(const device float* col0 [[buffer(0)]],
     // Target column for aggregation is always col0
     float target_val = cols[0][gid];
     
-    // Evaluate predicates with dynamic column access
+    // Evaluate predicates with dynamic column access and OR/AND logic
     bool passes = true;
-    for (uint c = 0; c < clause_count && passes; ++c) {
+    bool groupResult = true;
+    
+    for (uint c = 0; c < clause_count; ++c) {
         PredicateClause pc = clauses[c];
         if (pc.colIndex >= col_count) { passes = false; break; }
         
         float col_val = cols[pc.colIndex][gid];
         
+        bool clauseResult;
         if (pc.isDate) {
             // Date stored as YYYYMMDD integer in column, compare as integers
             int date_val = as_type<int>(col_val);  // reinterpret float bits as int
             int date_lit = (int)(pc.value & 0xFFFFFFFFull);  // lower 32 bits
             switch (pc.op) {
-                case 0: passes = date_val < date_lit; break;
-                case 1: passes = date_val <= date_lit; break;
-                case 2: passes = date_val > date_lit; break;
-                case 3: passes = date_val >= date_lit; break;
-                case 4: passes = date_val == date_lit; break;
+                case 0: clauseResult = date_val < date_lit; break;
+                case 1: clauseResult = date_val <= date_lit; break;
+                case 2: clauseResult = date_val > date_lit; break;
+                case 3: clauseResult = date_val >= date_lit; break;
+                case 4: clauseResult = date_val == date_lit; break;
+                default: clauseResult = false; break;
             }
         } else {
             // Numeric comparison
@@ -192,14 +197,26 @@ kernel void scan_filter_sum_f32(const device float* col0 [[buffer(0)]],
             conv.u = (uint32_t)(pc.value & 0xFFFFFFFFull);
             float lit = conv.f;
             switch (pc.op) {
-                case 0: passes = col_val < lit; break;
-                case 1: passes = col_val <= lit; break;
-                case 2: passes = col_val > lit; break;
-                case 3: passes = col_val >= lit; break;
-                case 4: passes = col_val == lit; break;
+                case 0: clauseResult = col_val < lit; break;
+                case 1: clauseResult = col_val <= lit; break;
+                case 2: clauseResult = col_val > lit; break;
+                case 3: clauseResult = col_val >= lit; break;
+                case 4: clauseResult = col_val == lit; break;
+                default: clauseResult = false; break;
             }
         }
+        
+        if (c == 0) {
+            groupResult = clauseResult;
+        } else if (clauses[c-1].isOrNext) {
+            groupResult = groupResult || clauseResult;
+        } else {
+            passes = passes && groupResult;
+            if (!passes) break;
+            groupResult = clauseResult;
+        }
     }
+    if (clause_count > 0) passes = passes && groupResult;
     
     localVals[tid] = (passes ? target_val : 0.0f);
     threadgroup_barrier(mem_flags::mem_threadgroup);
@@ -242,37 +259,53 @@ kernel void scan_filter_eval_sum(const device float* col0 [[buffer(0)]],
     
     const device float* cols[8] = {col0, col1, col2, col3, col4, col5, col6, col7};
     
-    // Evaluate predicates first
+    // Evaluate predicates first with OR/AND logic
     bool passes = true;
-    for (uint c = 0; c < clause_count && passes; ++c) {
+    bool groupResult = true;
+    
+    for (uint c = 0; c < clause_count; ++c) {
         PredicateClause pc = clauses[c];
         if (pc.colIndex >= col_count) { passes = false; break; }
         
         float col_val = cols[pc.colIndex][gid];
         
+        bool clauseResult;
         if (pc.isDate) {
             int date_val = as_type<int>(col_val);
             int date_lit = (int)(pc.value & 0xFFFFFFFFull);
             switch (pc.op) {
-                case 0: passes = date_val < date_lit; break;
-                case 1: passes = date_val <= date_lit; break;
-                case 2: passes = date_val > date_lit; break;
-                case 3: passes = date_val >= date_lit; break;
-                case 4: passes = date_val == date_lit; break;
+                case 0: clauseResult = date_val < date_lit; break;
+                case 1: clauseResult = date_val <= date_lit; break;
+                case 2: clauseResult = date_val > date_lit; break;
+                case 3: clauseResult = date_val >= date_lit; break;
+                case 4: clauseResult = date_val == date_lit; break;
+                default: clauseResult = false; break;
             }
         } else {
             union { uint32_t u; float f; } conv;
             conv.u = (uint32_t)(pc.value & 0xFFFFFFFFull);
             float lit = conv.f;
             switch (pc.op) {
-                case 0: passes = col_val < lit; break;
-                case 1: passes = col_val <= lit; break;
-                case 2: passes = col_val > lit; break;
-                case 3: passes = col_val >= lit; break;
-                case 4: passes = col_val == lit; break;
+                case 0: clauseResult = col_val < lit; break;
+                case 1: clauseResult = col_val <= lit; break;
+                case 2: clauseResult = col_val > lit; break;
+                case 3: clauseResult = col_val >= lit; break;
+                case 4: clauseResult = col_val == lit; break;
+                default: clauseResult = false; break;
             }
         }
+        
+        if (c == 0) {
+            groupResult = clauseResult;
+        } else if (clauses[c-1].isOrNext) {
+            groupResult = groupResult || clauseResult;
+        } else {
+            passes = passes && groupResult;
+            if (!passes) break;
+            groupResult = clauseResult;
+        }
     }
+    if (clause_count > 0) passes = passes && groupResult;
     
     float result_val = 0.0f;
     if (passes) {
@@ -498,36 +531,56 @@ kernel void scan_filter_aggregate(const device float* col0 [[buffer(0)]],
     const device float* cols[8] = {col0, col1, col2, col3, col4, col5, col6, col7};
     float target_val = cols[0][gid];
     
-    // Evaluate predicates
+    // Evaluate predicates with OR/AND logic
+    // Group consecutive clauses connected by OR, evaluate groups with AND
     bool passes = true;
-    for (uint c = 0; c < clause_count && passes; ++c) {
+    bool groupResult = true;
+    
+    for (uint c = 0; c < clause_count; ++c) {
         PredicateClause pc = clauses[c];
         if (pc.colIndex >= col_count) { passes = false; break; }
         float col_val = cols[pc.colIndex][gid];
         
+        bool clauseResult;
         if (pc.isDate) {
             int date_val = as_type<int>(col_val);
             int date_lit = (int)(pc.value & 0xFFFFFFFFull);
             switch (pc.op) {
-                case 0: passes = date_val < date_lit; break;
-                case 1: passes = date_val <= date_lit; break;
-                case 2: passes = date_val > date_lit; break;
-                case 3: passes = date_val >= date_lit; break;
-                case 4: passes = date_val == date_lit; break;
+                case 0: clauseResult = date_val < date_lit; break;
+                case 1: clauseResult = date_val <= date_lit; break;
+                case 2: clauseResult = date_val > date_lit; break;
+                case 3: clauseResult = date_val >= date_lit; break;
+                case 4: clauseResult = date_val == date_lit; break;
+                default: clauseResult = false; break;
             }
         } else {
             union { uint32_t u; float f; } conv;
             conv.u = (uint32_t)(pc.value & 0xFFFFFFFFull);
             float lit = conv.f;
             switch (pc.op) {
-                case 0: passes = col_val < lit; break;
-                case 1: passes = col_val <= lit; break;
-                case 2: passes = col_val > lit; break;
-                case 3: passes = col_val >= lit; break;
-                case 4: passes = col_val == lit; break;
+                case 0: clauseResult = col_val < lit; break;
+                case 1: clauseResult = col_val <= lit; break;
+                case 2: clauseResult = col_val > lit; break;
+                case 3: clauseResult = col_val >= lit; break;
+                case 4: clauseResult = col_val == lit; break;
+                default: clauseResult = false; break;
             }
         }
+        
+        if (c == 0) {
+            groupResult = clauseResult;
+        } else if (clauses[c-1].isOrNext) {
+            // Previous clause was OR'd with this one
+            groupResult = groupResult || clauseResult;
+        } else {
+            // Previous clause was AND'd - finish previous group
+            passes = passes && groupResult;
+            if (!passes) break; // Short circuit
+            groupResult = clauseResult;
+        }
     }
+    // Don't forget the last group
+    if (clause_count > 0) passes = passes && groupResult;
     
     // Initialize local values based on aggregation type
     if (aggType == 0) {
