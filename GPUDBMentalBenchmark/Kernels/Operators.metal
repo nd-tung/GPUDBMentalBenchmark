@@ -125,9 +125,11 @@ kernel void groupby_sum_f32(const device uint32_t* keys,
 struct PredicateClause {
     uint colIndex;   // Column index among provided buffers
     uint op;         // 0:LT 1:LE 2:GT 3:GE 4:EQ
-    uint isDate;     // 0 numeric 1 date/int
+    uint isDate;     // 0 numeric/string, 1 date/int
+    uint isString;   // 0 numeric/date, 1 string (hash comparison)
     uint isOrNext;   // 0 next clause is AND'd, 1 next clause is OR'd
-    int64_t value;   // encoded literal (date as YYYYMMDD or bitcasted double via int64)
+    uint _pad;       // padding for alignment
+    int64_t value;   // encoded literal (date as YYYYMMDD, float bits, or string hash)
 };
 
 // RPN expression token for arithmetic evaluation
@@ -190,6 +192,14 @@ kernel void scan_filter_sum_f32(const device float* col0 [[buffer(0)]],
                 case 3: clauseResult = date_val >= date_lit; break;
                 case 4: clauseResult = date_val == date_lit; break;
                 default: clauseResult = false; break;
+            }
+        } else if (pc.isString) {
+            // String comparison via hash - only equality supported
+            uint col_hash = as_type<uint>(col_val);  // reinterpret float as hash
+            uint lit_hash = (uint)(pc.value & 0xFFFFFFFFull);
+            switch (pc.op) {
+                case 4: clauseResult = (col_hash == lit_hash); break;  // Equal
+                default: clauseResult = false; break;  // Other ops not supported for strings
             }
         } else {
             // Numeric comparison
@@ -279,6 +289,13 @@ kernel void scan_filter_eval_sum(const device float* col0 [[buffer(0)]],
                 case 2: clauseResult = date_val > date_lit; break;
                 case 3: clauseResult = date_val >= date_lit; break;
                 case 4: clauseResult = date_val == date_lit; break;
+                default: clauseResult = false; break;
+            }
+        } else if (pc.isString) {
+            uint col_hash = as_type<uint>(col_val);
+            uint lit_hash = (uint)(pc.value & 0xFFFFFFFFull);
+            switch (pc.op) {
+                case 4: clauseResult = (col_hash == lit_hash); break;
                 default: clauseResult = false; break;
             }
         } else {

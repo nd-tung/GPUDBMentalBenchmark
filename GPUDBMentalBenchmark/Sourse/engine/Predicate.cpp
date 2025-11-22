@@ -7,7 +7,8 @@
 namespace engine::expr {
 
 static bool parse_single(const std::string& clause, Clause& out, const ExistsFn& exists) {
-    std::regex re("^\\s*([A-Za-z_][A-Za-z0-9_\\.]*)\\s*(<=|>=|=|<|>)\\s*(DATE\\s*'[^']+'|[+-]?[0-9]*\\.?[0-9]+)\\s*$", std::regex::icase);
+    // Updated regex to handle DATE 'xxx', 'string', or numeric literals
+    std::regex re("^\\s*([A-Za-z_][A-Za-z0-9_\\.]*)\\s*(<=|>=|=|<|>)\\s*(DATE\\s*'[^']+'|'[^']+'|[+-]?[0-9]*\\.?[0-9]+)\\s*$", std::regex::icase);
     std::smatch m; if (!std::regex_match(clause, m, re)) return false;
     std::string ident = m[1].str(); if (!exists(ident)) return false;
     std::string op = m[2].str(); std::string rhs = m[3].str();
@@ -18,8 +19,13 @@ static bool parse_single(const std::string& clause, Clause& out, const ExistsFn&
         auto q1 = rhs.find("'"); auto q2 = rhs.rfind("'");
         std::string lit = (q1!=std::string::npos && q2!=std::string::npos && q2>q1)? rhs.substr(q1+1, q2-q1-1) : rhs;
         c.isDate = true; c.date = parse_date_yyyymmdd(lit);
+    } else if (rhs[0] == '\'') {
+        // String literal
+        auto q1 = rhs.find("'"); auto q2 = rhs.rfind("'");
+        std::string lit = (q1!=std::string::npos && q2!=std::string::npos && q2>q1)? rhs.substr(q1+1, q2-q1-1) : rhs;
+        c.isString = true; c.strValue = lit;
     } else {
-        c.isDate = false; c.num = std::stod(rhs);
+        c.isDate = false; c.isString = false; c.num = std::stod(rhs);
     }
     out = c; return true;
 }

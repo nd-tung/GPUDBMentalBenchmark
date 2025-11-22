@@ -40,6 +40,34 @@ static std::vector<float> loadDateColumnAsFloat(const std::string& filePath, int
     } return data;
 }
 
+static uint32_t hashString(const std::string& str) {
+    // Simple FNV-1a hash for string comparison on GPU
+    uint32_t hash = 2166136261u;
+    for (char c : str) {
+        hash ^= static_cast<uint32_t>(c);
+        hash *= 16777619u;
+    }
+    return hash;
+}
+
+static std::vector<float> loadStringColumnAsHash(const std::string& filePath, int columnIndex) {
+    // Load string column and store hash as float bits for GPU
+    std::vector<float> data; std::ifstream file(filePath); if (!file.is_open()) return data; std::string line;
+    while (std::getline(file, line)) { std::string token; int col=0; size_t s=0,e=line.find('|');
+        while (e!=std::string::npos) { if (col==columnIndex) {
+            token=line.substr(s,e-s);
+            // Trim whitespace
+            token.erase(0, token.find_first_not_of(" \t\n\r"));
+            token.erase(token.find_last_not_of(" \t\n\r") + 1);
+            uint32_t hash = hashString(token);
+            union { uint32_t u; float f; } conv; conv.u = hash;
+            data.push_back(conv.f);  // Store hash bits as float
+            break;
+        }
+        s=e+1; e=line.find('|', s); ++col; }
+    } return data;
+}
+
 bool GpuExecutor::isEligible(const std::string& aggFunc,
                              const std::vector<expr::Clause>& clauses,
                              const std::string& targetColumn) {
@@ -54,9 +82,11 @@ bool GpuExecutor::isEligible(const std::string& aggFunc,
 struct PredicateClausePacked {
     uint32_t colIndex; // always 0 for now (single column kernel)
     uint32_t op;       // 0..4
-    uint32_t isDate;   // 0 numeric, 1 date
+    uint32_t isDate;   // 0 numeric, 1 date, 0 string
+    uint32_t isString; // 0 numeric/date, 1 string (hash comparison)
     uint32_t isOrNext; // 0 AND with next, 1 OR with next
-    int64_t value;     // lower 32 bits store float literal bits
+    uint32_t _pad;     // padding for alignment
+    int64_t value;     // lower 32 bits store float literal bits or string hash
 };
 
 // Multi-column predicate clause for scan_filter_aggregate kernel
@@ -64,7 +94,9 @@ struct PredicateClause {
     uint32_t colIndex;
     uint32_t op;
     uint32_t isDate;
+    uint32_t isString;
     uint32_t isOrNext;
+    uint32_t _pad;     // padding for 8-byte alignment
     int64_t value;
 };
 
@@ -449,7 +481,12 @@ GPUResult GpuExecutor::runAggregate(const std::string& dataset_path,
     
     // Load target column (for COUNT, any column works, use first one)
     std::string filePath = dataset_path + "lineitem.tbl";
-    int targetIdx = (aggType == 0 && targetColumn == "*") ? 4 : lineitem_schema.at(targetColumn);
+    int targetIdx;
+    if (aggType == 0 && (targetColumn == "*" || targetColumn.empty())) {
+        targetIdx = 4;  // l_quantity for COUNT
+    } else {
+        targetIdx = lineitem_schema.at(targetColumn);
+    }
     std::vector<float> targetData = loadFloatColumn(filePath, targetIdx);
     if (targetData.empty()) return {0.0, 0.0, 0.0, 0};
     
@@ -476,6 +513,10 @@ GPUResult GpuExecutor::runAggregate(const std::string& dataset_path,
         std::vector<float> colData;
         if (col == "l_shipdate" || col == "l_commitdate" || col == "l_receiptdate") {
             colData = loadDateColumnAsFloat(filePath, it->second);
+        } else if (col == "l_returnflag" || col == "l_linestatus" || col == "l_shipmode" || 
+                   col == "l_shipinstruct" || col == "l_comment") {
+            // String columns - load as hashes
+            colData = loadStringColumnAsHash(filePath, it->second);
         } else {
             colData = loadFloatColumn(filePath, it->second);
         }
@@ -496,10 +537,16 @@ GPUResult GpuExecutor::runAggregate(const std::string& dataset_path,
         pc.colIndex = colMap[cl.ident];
         pc.op = static_cast<uint32_t>(cl.op);
         pc.isDate = cl.isDate ? 1u : 0u;
+        pc.isString = cl.isString ? 1u : 0u;
         pc.isOrNext = cl.isOrNext ? 1u : 0u;
+        pc._pad = 0;
         
         if (pc.isDate) {
             pc.value = cl.date;
+        } else if (pc.isString) {
+            // Hash the string literal for comparison
+            uint32_t hash = hashString(cl.strValue);
+            pc.value = hash;
         } else {
             union { uint32_t u; float f; } conv;
             conv.f = static_cast<float>(cl.num);
