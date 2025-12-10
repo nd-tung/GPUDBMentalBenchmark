@@ -18,19 +18,41 @@ GPUDB_USE_GPU=1 ../build/bin/GPUDBEngineHost --sql "YOUR_SQL_QUERY"
 GPUDB_USE_GPU=1 ../build/bin/GPUDBEngineHost --sql "SELECT SUM(l_extendedprice) FROM lineitem WHERE l_quantity < 24"
 ```
 
-#### 2. Multi-Column Predicates with Date
+#### 2. AVG/MIN/MAX Aggregations
+```bash
+GPUDB_USE_GPU=1 ../build/bin/GPUDBEngineHost --sql "SELECT AVG(l_quantity) FROM lineitem WHERE l_quantity < 24"
+GPUDB_USE_GPU=1 ../build/bin/GPUDBEngineHost --sql "SELECT MIN(l_discount) FROM lineitem WHERE l_quantity < 24"
+GPUDB_USE_GPU=1 ../build/bin/GPUDBEngineHost --sql "SELECT MAX(l_tax) FROM lineitem WHERE l_quantity < 24"
+```
+
+#### 3. OR Predicates
+```bash
+GPUDB_USE_GPU=1 ../build/bin/GPUDBEngineHost --sql "SELECT SUM(l_discount) FROM lineitem WHERE l_quantity > 40 OR l_discount < 0.03"
+```
+
+#### 4. Multi-Column Predicates with Date
 ```bash
 GPUDB_USE_GPU=1 ../build/bin/GPUDBEngineHost --sql "SELECT SUM(l_extendedprice) FROM lineitem WHERE l_shipdate >= DATE '1994-01-01' AND l_shipdate < DATE '1995-01-01' AND l_discount >= 0.05 AND l_discount <= 0.07 AND l_quantity < 24"
 ```
 
-#### 3. JOIN Query
+#### 5. Arithmetic Expressions
+```bash
+GPUDB_USE_GPU=1 ../build/bin/GPUDBEngineHost --sql "SELECT SUM(l_extendedprice * (1 - l_discount)) FROM lineitem WHERE l_quantity < 24"
+```
+
+#### 6. JOIN Query
 ```bash
 GPUDB_USE_GPU=1 ../build/bin/GPUDBEngineHost --sql "SELECT SUM(l_extendedprice) FROM lineitem JOIN orders ON l_orderkey = o_orderkey"
 ```
 
-#### 4. JOIN with Different Aggregation
+#### 7. GROUP BY
 ```bash
-GPUDB_USE_GPU=1 ../build/bin/GPUDBEngineHost --sql "SELECT SUM(l_quantity) FROM lineitem JOIN orders ON l_orderkey = o_orderkey"
+GPUDB_USE_GPU=1 ../build/bin/GPUDBEngineHost --sql "SELECT l_returnflag, SUM(l_quantity) FROM lineitem GROUP BY l_returnflag"
+```
+
+#### 8. ORDER BY with LIMIT
+```bash
+GPUDB_USE_GPU=1 ../build/bin/GPUDBEngineHost --sql "SELECT * FROM lineitem ORDER BY l_quantity DESC LIMIT 10"
 ```
 
 ### Dataset Selection
@@ -58,14 +80,13 @@ make -j4
 
 ## Status
 
-### ✅ Working
-- SELECT with SUM aggregation
-- WHERE with numeric/date predicates (AND only)
-- INNER JOIN (lineitem-orders)
 
-### 🚧 TODO
-- Arithmetic expressions (kernel ready)
-- ORDER BY, LIMIT, GROUP BY (kernels ready)
-- String predicates
-- COUNT, AVG, MIN, MAX
-- OR predicates, subqueries
+### Partially Working
+- Multi-table JOINs (>2 tables fall back to CPU)
+- Complex GROUP BY (multi-key infrastructure ready)
+
+### Not Yet Implemented
+- OUTER/LEFT/RIGHT JOINs
+- Subqueries (IN/EXISTS)
+- HAVING, DISTINCT
+- String LIKE patterns
