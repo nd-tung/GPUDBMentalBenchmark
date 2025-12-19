@@ -155,9 +155,19 @@ Plan Planner::fromSQL(const std::string& sql) {
         jsonStr = raw;
     }
     
-    // For now, skip JSON parsing and use regex fallback for JOIN queries
-    // (DuckDB JSON has parsing issues with nlohmann::json)
+    // Try to parse DuckDB JSON (bug in nlohmann::json has been fixed)
     bool ok = false;
+    try {
+        json j = json::parse(jsonStr);
+        if (j.is_array() && j.size() > 0) {
+            traverse(j[0], p);
+            ok = !p.nodes.empty(); // Success if we got any nodes
+        }
+    } catch (...) {
+        // Fall back to regex parser if JSON parsing fails
+        ok = false;
+    }
+    
     if (!ok) {
         std::string low = tolower_copy(sql);
         std::string table; std::string predicate; std::string aggexpr;
