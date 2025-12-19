@@ -101,34 +101,41 @@ static void runEngineSQL(const std::string& sql) {
     
     // Check for GROUP BY
     bool hasGroupBy = false;
-    std::string groupByCol;
-    std::string aggCol;
+    std::vector<std::string> groupByCols;
+    std::vector<std::string> aggCols;
+    std::vector<std::string> aggFuncs;
+    
     for (const auto& n : plan.nodes) {
         if (n.type == IRNode::Type::GroupBy) {
             hasGroupBy = true;
-            if (!n.groupBy.keys.empty()) {
-                groupByCol = n.groupBy.keys[0];
+            groupByCols = n.groupBy.keys;
+            aggFuncs = n.groupBy.aggFuncs;
+            
+            // If aggFuncs is empty, default to "sum"
+            if (aggFuncs.empty() && !n.groupBy.aggs.empty()) {
+                aggFuncs.resize(n.groupBy.aggs.size(), "sum");
             }
-            if (!n.groupBy.aggs.empty()) {
-                // Extract column from aggregate expression (e.g., "l_extendedprice" from "sum(l_extendedprice)")
-                std::string agg = n.groupBy.aggs[0];
-                // Parse out the column name from SUM(column)
+            
+            // Extract column names from aggregate expressions
+            for (const auto& agg : n.groupBy.aggs) {
+                // Parse out the column name from AGG(column)
                 auto start = agg.find('(');
                 auto end = agg.rfind(')');
                 if (start != std::string::npos && end != std::string::npos && end > start) {
-                    aggCol = agg.substr(start + 1, end - start - 1);
+                    std::string col = agg.substr(start + 1, end - start - 1);
                     // Trim spaces
-                    aggCol.erase(0, aggCol.find_first_not_of(" \t\n\r"));
-                    aggCol.erase(aggCol.find_last_not_of(" \t\n\r") + 1);
+                    col.erase(0, col.find_first_not_of(" \t\n\r"));
+                    col.erase(col.find_last_not_of(" \t\n\r") + 1);
+                    aggCols.push_back(col);
                 } else {
-                    aggCol = agg;
+                    aggCols.push_back(agg);
                 }
             }
             break;
         }
     }
     
-    if (want_gpu && hasGroupBy && !groupByCol.empty() && !aggCol.empty()) {
+    if (want_gpu && hasGroupBy && !groupByCols.empty() && !aggCols.empty()) {
         // Extract table name
         std::string table = "lineitem";
         for (const auto& n : plan.nodes) {
@@ -139,19 +146,52 @@ static void runEngineSQL(const std::string& sql) {
         }
         
         // Run GPU GROUP BY
-        auto groupByRes = engine::GroupByExecutor::runGroupBySum(g_dataset_path, table, groupByCol, aggCol);
+        auto groupByRes = engine::GroupByExecutor::runGroupBy(g_dataset_path, table, groupByCols, aggCols, aggFuncs);
         
         if (!groupByRes.groups.empty()) {
             std::cout << "Result:" << std::endl;
-            std::cout << "GROUP BY " << groupByCol << " with SUM(" << aggCol << ")" << std::endl;
+            std::cout << "GROUP BY ";
+            for (size_t i = 0; i < groupByCols.size(); ++i) {
+                if (i > 0) std::cout << ", ";
+                std::cout << groupByCols[i];
+            }
+            std::cout << " with ";
+            for (size_t i = 0; i < aggCols.size(); ++i) {
+                if (i > 0) std::cout << ", ";
+                std::cout << (i < aggFuncs.size() ? aggFuncs[i] : "SUM") << "(" << aggCols[i] << ")";
+            }
+            std::cout << std::endl;
             printf("Upload time: %0.2f ms\n", groupByRes.upload_ms);
             printf("GPU kernel time: %0.2f ms\n", groupByRes.gpu_ms);
             printf("Number of groups: %zu\n", groupByRes.groups.size());
             
             // Show results (limit to first 10 for display)
             size_t count = 0;
-            for (const auto& [key, sum] : groupByRes.groups) {
-                std::cout << groupByCol << "=" << key << " -> SUM=" << sum << std::endl;
+            for (const auto& [keys, sums] : groupByRes.groups) {
+                // Print key (composite key shown as tuple)
+                if (keys.size() == 1) {
+                    std::cout << groupByCols[0] << "=" << keys[0];
+                } else {
+                    std::cout << "(";
+                    for (size_t i = 0; i < keys.size(); ++i) {
+                        if (i > 0) std::cout << ", ";
+                        std::cout << (i < groupByCols.size() ? groupByCols[i] : "key") << "=" << keys[i];
+                    }
+                    std::cout << ")";
+                }
+                // Print aggregate value(s)
+                std::cout << " -> ";
+                if (sums.size() == 1) {
+                    std::cout << (aggFuncs.empty() ? "AGG" : aggFuncs[0]) << "=" << sums[0];
+                } else {
+                    std::cout << "(";
+                    for (size_t i = 0; i < sums.size(); ++i) {
+                        if (i > 0) std::cout << ", ";
+                        std::cout << (i < aggFuncs.size() ? aggFuncs[i] : "AGG") << "=" << sums[i];
+                    }
+                    std::cout << ")";
+                }
+                std::cout << std::endl;
                 if (++count >= 10) {
                     if (groupByRes.groups.size() > 10) {
                         std::cout << "... (" << (groupByRes.groups.size() - 10) << " more groups)" << std::endl;

@@ -421,6 +421,106 @@ kernel void limit_copy(const device float* input [[buffer(0)]],
     }
 }
 
+// Multi-column GROUP BY with multiple aggregates
+// Supports up to 4 group key columns and 4 aggregate columns
+kernel void groupby_agg_multi_key(const device uint* key_col0 [[buffer(0)]],
+                                   const device uint* key_col1 [[buffer(1)]],
+                                   const device uint* key_col2 [[buffer(2)]],
+                                   const device uint* key_col3 [[buffer(3)]],
+                                   const device float* agg_col0 [[buffer(4)]],
+                                   const device float* agg_col1 [[buffer(5)]],
+                                   const device float* agg_col2 [[buffer(6)]],
+                                   const device float* agg_col3 [[buffer(7)]],
+                                   device atomic_uint* ht_keys [[buffer(8)]],   // Flattened: capacity * 4 uint32s
+                                   device atomic_uint* ht_agg_bits [[buffer(9)]], // Flattened: capacity * 4 floats as uint32
+                                   constant uint& capacity [[buffer(10)]],
+                                   constant uint& row_count [[buffer(11)]],
+                                   constant uint& num_keys [[buffer(12)]],      // Number of group keys (1-4)
+                                   constant uint& num_aggs [[buffer(13)]],      // Number of aggregates (1-4)
+                                   uint gid [[thread_position_in_grid]]) {
+    if (gid >= row_count) return;
+
+    constexpr uint IN_PROGRESS = 0xFFFFFFFFu;
+    
+    // Read composite key
+    uint keys[4];
+    keys[0] = (num_keys > 0) ? key_col0[gid] : 0;
+    keys[1] = (num_keys > 1) ? key_col1[gid] : 0;
+    keys[2] = (num_keys > 2) ? key_col2[gid] : 0;
+    keys[3] = (num_keys > 3) ? key_col3[gid] : 0;
+    
+    // Read aggregate values
+    float aggs[4];
+    aggs[0] = (num_aggs > 0) ? agg_col0[gid] : 0.0f;
+    aggs[1] = (num_aggs > 1) ? agg_col1[gid] : 0.0f;
+    aggs[2] = (num_aggs > 2) ? agg_col2[gid] : 0.0f;
+    aggs[3] = (num_aggs > 3) ? agg_col3[gid] : 0.0f;
+    
+    // Compute composite hash using FNV-1a
+    uint hash = 2166136261u;
+    for (uint i = 0; i < num_keys; ++i) {
+        hash ^= keys[i];
+        hash *= 16777619u;
+    }
+    uint slot = hash % capacity;
+    
+    // Linear probing to find or insert key
+    for (uint probe = 0; probe < capacity; ++probe) {
+        uint probe_slot = (slot + probe) % capacity;
+        uint base_idx = probe_slot * 4;  // 4 key columns per slot
+
+        // Use the first key as the slot state/ownership indicator.
+        // 0           => empty
+        // IN_PROGRESS => being initialized by another thread
+        // otherwise   => occupied with a valid key[0]
+        uint ht_k0 = atomic_load_explicit(&ht_keys[base_idx + 0], memory_order_relaxed);
+
+        // Empty slot - try to claim it
+        if (ht_k0 == 0u) {
+            uint expected = 0u;
+            if (atomic_compare_exchange_weak_explicit(&ht_keys[base_idx + 0], &expected, IN_PROGRESS,
+                                                      memory_order_relaxed, memory_order_relaxed)) {
+                // We own this slot now. Initialize the remaining keys then publish key0.
+                for (uint k = 1; k < num_keys; ++k) {
+                    atomic_store_explicit(&ht_keys[base_idx + k], keys[k], memory_order_relaxed);
+                }
+                atomic_store_explicit(&ht_keys[base_idx + 0], keys[0], memory_order_relaxed);
+
+                uint agg_base = probe_slot * 4;
+                for (uint a = 0; a < num_aggs; ++a) {
+                    atomicAddF32Bits(&ht_agg_bits[agg_base + a], aggs[a]);
+                }
+                return;
+            }
+            // Someone else raced us; retry this probe slot
+            continue;
+        }
+
+        // Skip slots that are still being initialized
+        if (ht_k0 == IN_PROGRESS) {
+            continue;
+        }
+
+        // Check if slot matches our full key
+        if (ht_k0 == keys[0]) {
+            bool match = true;
+            for (uint k = 1; k < num_keys; ++k) {
+                uint ht_k = atomic_load_explicit(&ht_keys[base_idx + k], memory_order_relaxed);
+                if (ht_k != keys[k]) { match = false; break; }
+            }
+            if (match) {
+                uint agg_base = probe_slot * 4;
+                for (uint a = 0; a < num_aggs; ++a) {
+                    atomicAddF32Bits(&ht_agg_bits[agg_base + a], aggs[a]);
+                }
+                return;
+            }
+        }
+        
+        // Collision - continue probing
+    }
+}
+
 // Multi-key GROUP BY with aggregation
 // Simplified version for single uint32 key
 kernel void groupby_agg_single_key(const device uint* keys [[buffer(0)]],
@@ -444,6 +544,7 @@ kernel void groupby_agg_single_key(const device uint* keys [[buffer(0)]],
     atomic_fetch_add_explicit(&ht_counts[slot], 1u, memory_order_relaxed);
     atomicAddF32Bits(&ht_sum_bits[slot], val);
 }
+
 
 // Hash join: Build phase
 kernel void hash_join_build(const device uint* keys [[buffer(0)]],

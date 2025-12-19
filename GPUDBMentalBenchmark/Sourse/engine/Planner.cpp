@@ -14,9 +14,45 @@ namespace engine {
 
 static std::string tolower_copy(std::string s){ std::transform(s.begin(), s.end(), s.begin(), [](unsigned char c){return std::tolower(c);}); return s; }
 
-static void traverse(const json& node, Plan& p) {
+// Helper to resolve column references like "#0" to actual names
+static std::string resolveColumnRef(const std::string& ref, const std::vector<std::string>& projections) {
+    if (ref.empty() || ref[0] != '#') return ref;
+    try {
+        size_t idx = std::stoull(ref.substr(1));
+        if (idx < projections.size()) return projections[idx];
+    } catch (...) {}
+    return ref;
+}
+
+static void traverse(const json& node, Plan& p, std::vector<std::string> projections = {}) {
     if (node.is_object()) {
         std::string name = node.contains("name") && node["name"].is_string() ? node["name"].get_string() : "";
+        
+        // Track projections from this node to resolve references in child nodes
+        std::vector<std::string> currentProjections = projections;
+        if (node.contains("extra_info") && node["extra_info"].is_object()) {
+            const auto& ei = node["extra_info"];
+            if (ei.contains("Projections") && ei["Projections"].is_array()) {
+                currentProjections.clear();
+                for (size_t i = 0; i < ei["Projections"].size(); i++) {
+                    if (ei["Projections"][i].is_string()) {
+                        std::string proj = ei["Projections"][i].get_string();
+                        // Strip internal functions to get column names
+                        if (proj.find("__internal_") != std::string::npos) {
+                            size_t start = proj.find('(');
+                            size_t end = proj.rfind(')');
+                            if (start != std::string::npos && end != std::string::npos && end > start) {
+                                proj = proj.substr(start + 1, end - start - 1);
+                            }
+                        }
+                        // Resolve references from parent projections
+                        proj = resolveColumnRef(proj, projections);
+                        currentProjections.push_back(proj);
+                    }
+                }
+            }
+        }
+        
         // extra_info can be string or object
         std::string extra;
         if (node.contains("extra_info")) {
@@ -51,19 +87,103 @@ static void traverse(const json& node, Plan& p) {
             // Parse GROUP BY node
             IRNode g; g.type = IRNode::Type::GroupBy;
             
-            // Extract group by keys from extra_info
-            if (node.contains("extra_info") && node["extra_info"].is_object()) {
-                const auto& ei = node["extra_info"];
-                if (ei.contains("Groups") && ei["Groups"].is_string()) {
-                    std::string groups = ei["Groups"].get_string();
-                    // Parse group columns (e.g., "#0" or "l_orderkey")
-                    g.groupBy.keys.push_back(groups);
+            // Get projections from the immediate child PROJECTION node
+            std::vector<std::string> childProjections;
+            if (node.contains("children") && node["children"].is_array() && node["children"].size() > 0) {
+                const auto& firstChild = node["children"][0];
+                if (firstChild.is_object() && firstChild.contains("extra_info") && firstChild["extra_info"].is_object()) {
+                    const auto& childEi = firstChild["extra_info"];
+                    if (childEi.contains("Projections") && childEi["Projections"].is_array()) {
+                        for (size_t i = 0; i < childEi["Projections"].size(); i++) {
+                            if (childEi["Projections"][i].is_string()) {
+                                std::string proj = childEi["Projections"][i].get_string();
+                                // Strip internal functions
+                                if (proj.find("__internal_") != std::string::npos) {
+                                    size_t start = proj.find('(');
+                                    size_t end = proj.rfind(')');
+                                    if (start != std::string::npos && end != std::string::npos && end > start) {
+                                        proj = proj.substr(start + 1, end - start - 1);
+                                    }
+                                }
+                                childProjections.push_back(proj);
+                            }
+                        }
+                    }
                 }
             }
             
-            // Extract aggregate expressions from extra field
-            if (!extra.empty()) {
-                g.groupBy.aggs.push_back(extra);
+            // Extract group by keys from extra_info
+            if (node.contains("extra_info") && node["extra_info"].is_object()) {
+                const auto& ei = node["extra_info"];
+                if (ei.contains("Groups")) {
+                    const auto& groupsNode = ei["Groups"];
+                    if (groupsNode.is_array()) {
+                        // Parse array of strings like ["#0", "#1"] and resolve to actual column names
+                        for (size_t i = 0; i < groupsNode.size(); i++) {
+                            if (groupsNode[i].is_string()) {
+                                std::string col = groupsNode[i].get_string();
+                                // Resolve column reference using child projections
+                                col = resolveColumnRef(col, childProjections);
+                                if (!col.empty()) g.groupBy.keys.push_back(col);
+                            }
+                        }
+                    } else if (groupsNode.is_string()) {
+                        // Fallback for string format like "#0, #1"
+                        std::string groups = groupsNode.get_string();
+                        // Split by comma for multiple columns (e.g., "#0, #1")
+                        size_t start = 0;
+                        while (start < groups.size()) {
+                            size_t comma = groups.find(',', start);
+                            if (comma == std::string::npos) comma = groups.size();
+                            std::string col = groups.substr(start, comma - start);
+                            // Trim spaces
+                            col.erase(0, col.find_first_not_of(" \t\n\r"));
+                            col.erase(col.find_last_not_of(" \t\n\r") + 1);
+                            if (!col.empty()) g.groupBy.keys.push_back(col);
+                            start = comma + 1;
+                        }
+                    }
+                }
+            }
+            
+            // Extract aggregate expressions and functions from extra_info
+            if (node.contains("extra_info") && node["extra_info"].is_object()) {
+                const auto& ei = node["extra_info"];
+                if (ei.contains("Aggregates")) {
+                    const auto& aggsNode = ei["Aggregates"];
+                    if (aggsNode.is_array()) {
+                        // Parse array of strings like ["sum(#2)", "sum(#3)"] and resolve references
+                        for (size_t i = 0; i < aggsNode.size(); i++) {
+                            if (aggsNode[i].is_string()) {
+                                std::string agg = aggsNode[i].get_string();
+                                // Resolve column references inside aggregate functions
+                                size_t start = agg.find('(');
+                                size_t end = agg.rfind(')');
+                                if (start != std::string::npos && end != std::string::npos && end > start) {
+                                    std::string colRef = agg.substr(start + 1, end - start - 1);
+                                    std::string resolved = resolveColumnRef(colRef, childProjections);
+                                    agg = agg.substr(0, start + 1) + resolved + agg.substr(end);
+                                }
+                                g.groupBy.aggs.push_back(agg);
+                                // Extract function name
+                                std::string aggLower = tolower_copy(agg);
+                                if (aggLower.find("sum(") != std::string::npos) {
+                                    g.groupBy.aggFuncs.push_back("sum");
+                                } else if (aggLower.find("avg(") != std::string::npos) {
+                                    g.groupBy.aggFuncs.push_back("avg");
+                                } else if (aggLower.find("min(") != std::string::npos) {
+                                    g.groupBy.aggFuncs.push_back("min");
+                                } else if (aggLower.find("max(") != std::string::npos) {
+                                    g.groupBy.aggFuncs.push_back("max");
+                                } else if (aggLower.find("count(") != std::string::npos) {
+                                    g.groupBy.aggFuncs.push_back("count");
+                                } else {
+                                    g.groupBy.aggFuncs.push_back("sum");  // default
+                                }
+                            }
+                        }
+                    }
+                }
             }
             
             p.nodes.push_back(g);
@@ -117,11 +237,11 @@ static void traverse(const json& node, Plan& p) {
         }
         if (node.contains("children")) {
             const auto& ch = node["children"]; if (ch.is_array()) {
-                for (std::size_t i=0;i<ch.size();++i) traverse(ch[i], p);
+                for (std::size_t i=0;i<ch.size();++i) traverse(ch[i], p, currentProjections);
             }
         }
     } else if (node.is_array()) {
-        for (std::size_t i=0;i<node.size(); ++i) traverse(node[i], p);
+        for (std::size_t i=0;i<node.size(); ++i) traverse(node[i], p, projections);
     }
 }
 
@@ -163,6 +283,9 @@ Plan Planner::fromSQL(const std::string& sql) {
             traverse(j[0], p);
             ok = !p.nodes.empty(); // Success if we got any nodes
         }
+    } catch (const std::exception& e) {
+        // Fall back to regex parser if JSON parsing fails
+        ok = false;
     } catch (...) {
         // Fall back to regex parser if JSON parsing fails
         ok = false;
@@ -255,7 +378,15 @@ Plan Planner::fromSQL(const std::string& sql) {
                 if (!col.empty()) g.groupBy.keys.push_back(col);
                 start = comma + 1;
             }
-            if (!aggexpr.empty()) g.groupBy.aggs.push_back(aggexpr);
+            if (!aggexpr.empty()) {
+                g.groupBy.aggs.push_back(aggexpr);
+                // Also extract and store the function name
+                if (!aggFunc.empty()) {
+                    g.groupBy.aggFuncs.push_back(aggFunc);
+                } else {
+                    g.groupBy.aggFuncs.push_back("sum");  // default
+                }
+            }
             p.nodes.push_back(g);
         }
         

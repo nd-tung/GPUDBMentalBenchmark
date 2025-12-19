@@ -9,7 +9,8 @@
 #include <iostream>
 #include <Metal/Metal.hpp>
 
-static const char* KERNEL_GROUPBY = "ops::groupby_agg_single_key";
+[[maybe_unused]] static const char* KERNEL_GROUPBY_SINGLE = "ops::groupby_agg_single_key";
+static const char* KERNEL_GROUPBY_MULTI = "ops::groupby_agg_multi_key";
 
 namespace engine {
 
@@ -26,7 +27,17 @@ static std::vector<uint32_t> loadUInt32Column(const std::string& filePath, int c
         while (e != std::string::npos) {
             if (col == columnIndex) {
                 token = line.substr(s, e - s);
-                data.push_back(std::stoul(token));
+                // Handle string columns by hashing (simple FNV-1a)
+                if (!token.empty() && !std::isdigit(token[0])) {
+                    uint32_t hash = 2166136261u;
+                    for (char c : token) {
+                        hash ^= static_cast<uint8_t>(c);
+                        hash *= 16777619u;
+                    }
+                    data.push_back(hash);
+                } else {
+                    data.push_back(token.empty() ? 0 : std::stoul(token));
+                }
                 break;
             }
             s = e + 1;
@@ -61,16 +72,19 @@ static std::vector<float> loadFloatColumn(const std::string& filePath, int colum
     return data;
 }
 
-bool GroupByExecutor::isEligible(const std::string& groupByColumn, const std::string& aggColumn) {
-    if (groupByColumn.empty() || aggColumn.empty()) return false;
-    // For now, only support integer group keys
+bool GroupByExecutor::isEligible(const std::vector<std::string>& groupByColumns, 
+                                 const std::vector<std::string>& aggColumns) {
+    if (groupByColumns.empty() || aggColumns.empty()) return false;
+    if (groupByColumns.size() > 4 || aggColumns.size() > 4) return false;  // Hardware limit
     return true;
 }
 
-GroupByResult GroupByExecutor::runGroupBySum(const std::string& dataset_path,
-                                             const std::string& table,
-                                             const std::string& groupByColumn,
-                                             const std::string& aggColumn) {
+GroupByResult GroupByExecutor::runGroupBy(const std::string& dataset_path,
+                                          const std::string& table,
+                                          const std::vector<std::string>& groupByColumns,
+                                          const std::vector<std::string>& aggColumns,
+                                          const std::vector<std::string>& aggFuncs) {
+    (void)aggFuncs;
     static const std::map<std::string, std::map<std::string, int>> column_indices = {
         {"lineitem", {
             {"l_orderkey", 0}, {"l_partkey", 1}, {"l_suppkey", 2}, {"l_linenumber", 3},
@@ -91,34 +105,50 @@ GroupByResult GroupByExecutor::runGroupBySum(const std::string& dataset_path,
         return {{}, 0.0, 0.0};
     }
     
-    auto groupColIt = tableIt->second.find(groupByColumn);
-    auto aggColIt = tableIt->second.find(aggColumn);
-    if (groupColIt == tableIt->second.end() || aggColIt == tableIt->second.end()) {
-        std::cerr << "[GROUPBY] Unknown column" << std::endl;
-        return {{}, 0.0, 0.0};
+    std::vector<int> groupIdxs, aggIdxs;
+    for (const auto& col : groupByColumns) {
+        auto it = tableIt->second.find(col);
+        if (it == tableIt->second.end()) {
+            std::cerr << "[GROUPBY] Unknown group column: " << col << std::endl;
+            return {{}, 0.0, 0.0};
+        }
+        groupIdxs.push_back(it->second);
+    }
+    for (const auto& col : aggColumns) {
+        auto it = tableIt->second.find(col);
+        if (it == tableIt->second.end()) {
+            std::cerr << "[GROUPBY] Unknown agg column: " << col << std::endl;
+            return {{}, 0.0, 0.0};
+        }
+        aggIdxs.push_back(it->second);
     }
     
     auto uploadStart = std::chrono::high_resolution_clock::now();
     
-    // Load data
-    std::vector<uint32_t> groupKeys = loadUInt32Column(path, groupColIt->second);
-    std::vector<float> aggValues = loadFloatColumn(path, aggColIt->second);
+    // Load group key columns
+    std::vector<std::vector<uint32_t>> groupKeyCols;
+    for (int idx : groupIdxs) {
+        groupKeyCols.push_back(loadUInt32Column(path, idx));
+    }
     
-    if (groupKeys.empty() || aggValues.empty() || groupKeys.size() != aggValues.size()) {
+    // Load aggregate value columns
+    std::vector<std::vector<float>> aggValCols;
+    for (int idx : aggIdxs) {
+        aggValCols.push_back(loadFloatColumn(path, idx));
+    }
+    
+    if (groupKeyCols.empty() || aggValCols.empty() || groupKeyCols[0].empty()) {
         std::cerr << "[GROUPBY] Failed to load data" << std::endl;
         return {{}, 0.0, 0.0};
     }
     
-    uint32_t rowCount = static_cast<uint32_t>(groupKeys.size());
+    uint32_t rowCount = static_cast<uint32_t>(groupKeyCols[0].size());
+
     
-    // Find unique key count for hash table sizing
-    std::vector<uint32_t> uniqueKeys = groupKeys;
-    std::sort(uniqueKeys.begin(), uniqueKeys.end());
-    uniqueKeys.erase(std::unique(uniqueKeys.begin(), uniqueKeys.end()), uniqueKeys.end());
-    uint32_t uniqueCount = static_cast<uint32_t>(uniqueKeys.size());
-    
-    // Hash table capacity (2x unique keys)
-    uint32_t capacity = uniqueCount * 2;
+    // Estimate unique key combinations for hash table sizing
+    // For multi-column, use heuristic: min(product of cardinalities, row_count / 2)
+    uint32_t estimatedUnique = std::min(rowCount / 2, rowCount / 10);
+    uint32_t capacity = estimatedUnique * 3;  // 3x for hash table load factor
     
     auto& store = ColumnStoreGPU::instance();
     store.initialize();
@@ -127,24 +157,46 @@ GroupByResult GroupByExecutor::runGroupBySum(const std::string& dataset_path,
         return {{}, 0.0, 0.0};
     }
     
-    // Create GPU buffers
-    auto keysBuffer = store.device()->newBuffer(groupKeys.data(),
-                                                rowCount * sizeof(uint32_t),
-                                                MTL::ResourceStorageModeShared);
-    auto valuesBuffer = store.device()->newBuffer(aggValues.data(),
+    uint32_t numKeys = static_cast<uint32_t>(groupKeyCols.size());
+    uint32_t numAggs = static_cast<uint32_t>(aggValCols.size());
+    
+    // Create GPU buffers for key columns (up to 4)
+    std::vector<MTL::Buffer*> keyBuffers(4, nullptr);
+    for (uint32_t i = 0; i < numKeys && i < 4; ++i) {
+        keyBuffers[i] = store.device()->newBuffer(groupKeyCols[i].data(),
+                                                  rowCount * sizeof(uint32_t),
+                                                  MTL::ResourceStorageModeShared);
+    }
+    // Dummy buffers for unused key slots
+    std::vector<uint32_t> dummy(rowCount, 0);
+    for (uint32_t i = numKeys; i < 4; ++i) {
+        keyBuffers[i] = store.device()->newBuffer(dummy.data(),
+                                                  rowCount * sizeof(uint32_t),
+                                                  MTL::ResourceStorageModeShared);
+    }
+    
+    // Create GPU buffers for aggregate columns (up to 4)
+    std::vector<MTL::Buffer*> aggBuffers(4, nullptr);
+    for (uint32_t i = 0; i < numAggs && i < 4; ++i) {
+        aggBuffers[i] = store.device()->newBuffer(aggValCols[i].data(),
                                                   rowCount * sizeof(float),
                                                   MTL::ResourceStorageModeShared);
+    }
+    // Dummy buffers for unused agg slots
+    std::vector<float> dummyF(rowCount, 0.0f);
+    for (uint32_t i = numAggs; i < 4; ++i) {
+        aggBuffers[i] = store.device()->newBuffer(dummyF.data(),
+                                                  rowCount * sizeof(float),
+                                                  MTL::ResourceStorageModeShared);
+    }
     
-    // Hash table buffers (initialized to zero)
-    auto htKeysBuffer = store.device()->newBuffer(capacity * sizeof(uint32_t),
+    // Hash table buffers: capacity * 4 slots for keys and aggregates
+    auto htKeysBuffer = store.device()->newBuffer(capacity * 4 * sizeof(uint32_t),
                                                   MTL::ResourceStorageModeShared);
-    auto htCountsBuffer = store.device()->newBuffer(capacity * sizeof(uint32_t),
-                                                    MTL::ResourceStorageModeShared);
-    auto htSumsBuffer = store.device()->newBuffer(capacity * sizeof(uint32_t),
-                                                  MTL::ResourceStorageModeShared);
-    std::memset(htKeysBuffer->contents(), 0, capacity * sizeof(uint32_t));
-    std::memset(htCountsBuffer->contents(), 0, capacity * sizeof(uint32_t));
-    std::memset(htSumsBuffer->contents(), 0, capacity * sizeof(uint32_t));
+    auto htAggBuffer = store.device()->newBuffer(capacity * 4 * sizeof(uint32_t),
+                                                 MTL::ResourceStorageModeShared);
+    std::memset(htKeysBuffer->contents(), 0, capacity * 4 * sizeof(uint32_t));
+    std::memset(htAggBuffer->contents(), 0, capacity * 4 * sizeof(uint32_t));
     
     auto uploadEnd = std::chrono::high_resolution_clock::now();
     double upload_ms = std::chrono::duration<double, std::milli>(uploadEnd - uploadStart).count();
@@ -153,21 +205,16 @@ GroupByResult GroupByExecutor::runGroupBySum(const std::string& dataset_path,
     static MTL::ComputePipelineState* pipeline = nullptr;
     if (!pipeline) {
         NS::Error* error = nullptr;
-        auto fnName = NS::String::string(KERNEL_GROUPBY, NS::UTF8StringEncoding);
+        auto fnName = NS::String::string(KERNEL_GROUPBY_MULTI, NS::UTF8StringEncoding);
         MTL::Function* fn = store.library()->newFunction(fnName);
         if (!fn) {
+            std::cerr << "[GROUPBY] Kernel not found: " << KERNEL_GROUPBY_MULTI << std::endl;
             fnName->release();
-            fnName = NS::String::string("groupby_agg_single_key", NS::UTF8StringEncoding);
-            fn = store.library()->newFunction(fnName);
-        }
-        if (!fn) {
-            std::cerr << "[GROUPBY] Kernel not found" << std::endl;
-            fnName->release();
-            keysBuffer->release();
-            valuesBuffer->release();
+            // Cleanup
+            for (auto* buf : keyBuffers) buf->release();
+            for (auto* buf : aggBuffers) buf->release();
             htKeysBuffer->release();
-            htCountsBuffer->release();
-            htSumsBuffer->release();
+            htAggBuffer->release();
             return {{}, 0.0, upload_ms};
         }
         pipeline = store.device()->newComputePipelineState(fn, &error);
@@ -175,11 +222,10 @@ GroupByResult GroupByExecutor::runGroupBySum(const std::string& dataset_path,
         fnName->release();
         if (!pipeline) {
             if (error) std::cerr << "[GROUPBY] Pipeline error: " << error->localizedDescription()->utf8String() << std::endl;
-            keysBuffer->release();
-            valuesBuffer->release();
+            for (auto* buf : keyBuffers) buf->release();
+            for (auto* buf : aggBuffers) buf->release();
             htKeysBuffer->release();
-            htCountsBuffer->release();
-            htSumsBuffer->release();
+            htAggBuffer->release();
             return {{}, 0.0, upload_ms};
         }
     }
@@ -190,13 +236,22 @@ GroupByResult GroupByExecutor::runGroupBySum(const std::string& dataset_path,
     MTL::ComputeCommandEncoder* enc = cmd->computeCommandEncoder();
     enc->setComputePipelineState(pipeline);
     
-    enc->setBuffer(keysBuffer, 0, 0);
-    enc->setBuffer(valuesBuffer, 0, 1);
-    enc->setBuffer(htKeysBuffer, 0, 2);
-    enc->setBuffer(htCountsBuffer, 0, 3);
-    enc->setBuffer(htSumsBuffer, 0, 4);
-    enc->setBytes(&capacity, sizeof(capacity), 5);
-    enc->setBytes(&rowCount, sizeof(rowCount), 6);
+    // Bind key columns (buffers 0-3)
+    for (uint32_t i = 0; i < 4; ++i) {
+        enc->setBuffer(keyBuffers[i], 0, i);
+    }
+    // Bind agg columns (buffers 4-7)
+    for (uint32_t i = 0; i < 4; ++i) {
+        enc->setBuffer(aggBuffers[i], 0, 4 + i);
+    }
+    // Bind hash table buffers
+    enc->setBuffer(htKeysBuffer, 0, 8);
+    enc->setBuffer(htAggBuffer, 0, 9);
+    // Bind constants
+    enc->setBytes(&capacity, sizeof(capacity), 10);
+    enc->setBytes(&rowCount, sizeof(rowCount), 11);
+    enc->setBytes(&numKeys, sizeof(numKeys), 12);
+    enc->setBytes(&numAggs, sizeof(numAggs), 13);
     
     NS::UInteger maxTG = pipeline->maxTotalThreadsPerThreadgroup();
     if (maxTG > rowCount) maxTG = rowCount;
@@ -213,25 +268,62 @@ GroupByResult GroupByExecutor::runGroupBySum(const std::string& dataset_path,
     
     // Read back results
     uint32_t* htKeys = reinterpret_cast<uint32_t*>(htKeysBuffer->contents());
-    uint32_t* htSums = reinterpret_cast<uint32_t*>(htSumsBuffer->contents());
+    uint32_t* htAggs = reinterpret_cast<uint32_t*>(htAggBuffer->contents());
     
-    std::map<uint32_t, double> results;
+    std::map<std::vector<uint32_t>, std::vector<double>> results;
     for (uint32_t i = 0; i < capacity; ++i) {
-        if (htKeys[i] != 0) {  // Non-empty slot
-            union { uint32_t u; float f; } conv;
-            conv.u = htSums[i];
-            results[htKeys[i]] = static_cast<double>(conv.f);
+        uint32_t baseKeyIdx = i * 4;
+        // Check if slot is occupied (any key non-zero)
+        bool occupied = false;
+        for (uint32_t k = 0; k < numKeys; ++k) {
+            if (htKeys[baseKeyIdx + k] != 0) {
+                occupied = true;
+                break;
+            }
+        }
+        
+        if (occupied) {
+            std::vector<uint32_t> key(numKeys);
+            for (uint32_t k = 0; k < numKeys; ++k) {
+                key[k] = htKeys[baseKeyIdx + k];
+            }
+            
+            std::vector<double> aggs(numAggs);
+            uint32_t baseAggIdx = i * 4;
+            for (uint32_t a = 0; a < numAggs; ++a) {
+                union { uint32_t u; float f; } conv;
+                conv.u = htAggs[baseAggIdx + a];
+                aggs[a] = static_cast<double>(conv.f);
+            }
+
+            auto it = results.find(key);
+            if (it == results.end()) {
+                results.emplace(std::move(key), std::move(aggs));
+            } else {
+                for (uint32_t a = 0; a < numAggs; ++a) {
+                    it->second[a] += aggs[a];
+                }
+            }
         }
     }
     
     // Release buffers
-    keysBuffer->release();
-    valuesBuffer->release();
+    for (auto* buf : keyBuffers) buf->release();
+    for (auto* buf : aggBuffers) buf->release();
     htKeysBuffer->release();
-    htCountsBuffer->release();
-    htSumsBuffer->release();
+    htAggBuffer->release();
     
     return {results, gpu_ms, upload_ms};
+}
+
+// Legacy single-column interface for backwards compatibility
+GroupByResult GroupByExecutor::runGroupBySum(const std::string& dataset_path,
+                                             const std::string& table,
+                                             const std::string& groupByColumn,
+                                             const std::string& aggColumn) {
+    // Delegate to multi-column version
+    return runGroupBy(dataset_path, table, 
+                     {groupByColumn}, {aggColumn}, {"sum"});
 }
 
 } // namespace engine

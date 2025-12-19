@@ -23,8 +23,9 @@ struct IRLimit {
     int64_t offset = 0;    // rows to skip
 };
 struct IRGroupBy {
-    std::vector<std::string> keys;     // GROUP BY columns
+    std::vector<std::string> keys;     // GROUP BY columns (can be multiple)
     std::vector<std::string> aggs;     // Aggregate expressions
+    std::vector<std::string> aggFuncs; // Aggregate function names (SUM, AVG, etc.)
 };
 struct IRJoin {
     std::string rightTable;            // Right side table name

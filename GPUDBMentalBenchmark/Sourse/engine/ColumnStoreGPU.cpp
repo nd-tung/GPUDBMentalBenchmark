@@ -18,18 +18,17 @@ void ColumnStoreGPU::initialize() {
     }
     m_device->setShouldMaximizeConcurrentCompilation(true);
     m_queue = m_device->newCommandQueue();
-    // Try default library first; else load metallib next to assets
-    m_library = m_device->newDefaultLibrary();
+    // Load metallib from file to get latest kernels
+    NS::Error* error = nullptr;
+    auto path = NS::String::string("build/kernels.metallib", NS::UTF8StringEncoding);
+    m_library = m_device->newLibrary(path, &error);
     if (!m_library) {
-        NS::Error* error = nullptr;
-        auto path = NS::String::string("default.metallib", NS::UTF8StringEncoding);
-        m_library = m_device->newLibrary(path, &error);
-        if (!m_library) {
-            std::cerr << "[GPU] Failed to load Metal library" << std::endl;
-            if (error) std::cerr << "  Reason: " << error->localizedDescription()->utf8String() << std::endl;
-        }
-        path->release();
+        std::cerr << "[GPU] Failed to load Metal library from " << path->utf8String() << std::endl;
+        if (error) std::cerr << "  Reason: " << error->localizedDescription()->utf8String() << std::endl;
+        // Try default library as fallback
+        m_library = m_device->newDefaultLibrary();
     }
+    if (path) path->release();
 }
 
 GPUColumn* ColumnStoreGPU::stageFloatColumn(const std::string& name,
