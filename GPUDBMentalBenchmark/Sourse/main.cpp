@@ -1010,34 +1010,79 @@ void runQ9Benchmark(MTL::Device* pDevice, MTL::CommandQueue* pCommandQueue, MTL:
     const uint part_size = (uint)p_partkey.size(), supplier_size = (uint)s_suppkey.size(), lineitem_size = (uint)l_partkey.size();
     const uint partsupp_size = (uint)ps_partkey.size(), orders_size = (uint)o_orderkey.size();
     std::cout << "Loaded data for all tables." << std::endl;
+    std::cout << "Part size: " << part_size << ", Supplier size: " << supplier_size << ", Lineitem size: " << lineitem_size << std::endl;
+
+    // Debug: Check for 'green' in p_name
+    int green_count = 0;
+    for (size_t i = 0; i < part_size; ++i) {
+        bool match = false;
+        for(int j = 0; j < 50; ++j) {
+            if (p_name[i * 55 + j] == 'g' && p_name[i * 55 + j + 1] == 'r' &&
+                p_name[i * 55 + j + 2] == 'e' && p_name[i * 55 + j + 3] == 'e' &&
+                p_name[i * 55 + j + 4] == 'n') {
+                match = true;
+                break;
+            }
+        }
+        if (match) green_count++;
+    }
+    std::cout << "Found " << green_count << " parts with 'green' in name (CPU check)." << std::endl;
+
 
     // 2. Setup all kernel pipelines
     NS::Error* pError = nullptr;
     MTL::Function* pPartBuildFn = pLibrary->newFunction(NS::String::string("q9_build_part_ht_kernel", NS::UTF8StringEncoding));
     MTL::ComputePipelineState* pPartBuildPipe = pDevice->newComputePipelineState(pPartBuildFn, &pError);
+    if (!pPartBuildPipe) { std::cerr << "Failed to create pPartBuildPipe: " << pError->localizedDescription()->utf8String() << std::endl; return; }
+
     MTL::Function* pSuppBuildFn = pLibrary->newFunction(NS::String::string("q9_build_supplier_ht_kernel", NS::UTF8StringEncoding));
     MTL::ComputePipelineState* pSuppBuildPipe = pDevice->newComputePipelineState(pSuppBuildFn, &pError);
+    if (!pSuppBuildPipe) { std::cerr << "Failed to create pSuppBuildPipe: " << pError->localizedDescription()->utf8String() << std::endl; return; }
+
     MTL::Function* pPartSuppBuildFn = pLibrary->newFunction(NS::String::string("q9_build_partsupp_ht_kernel", NS::UTF8StringEncoding));
     MTL::ComputePipelineState* pPartSuppBuildPipe = pDevice->newComputePipelineState(pPartSuppBuildFn, &pError);
+    if (!pPartSuppBuildPipe) { std::cerr << "Failed to create pPartSuppBuildPipe: " << pError->localizedDescription()->utf8String() << std::endl; return; }
+
     MTL::Function* pOrdersBuildFn = pLibrary->newFunction(NS::String::string("q9_build_orders_ht_kernel", NS::UTF8StringEncoding));
     MTL::ComputePipelineState* pOrdersBuildPipe = pDevice->newComputePipelineState(pOrdersBuildFn, &pError);
+    if (!pOrdersBuildPipe) { std::cerr << "Failed to create pOrdersBuildPipe: " << pError->localizedDescription()->utf8String() << std::endl; return; }
+
     MTL::Function* pProbeAggFn = pLibrary->newFunction(NS::String::string("q9_probe_and_local_agg_kernel", NS::UTF8StringEncoding));
     MTL::ComputePipelineState* pProbeAggPipe = pDevice->newComputePipelineState(pProbeAggFn, &pError);
+    if (!pProbeAggPipe) { std::cerr << "Failed to create pProbeAggPipe: " << pError->localizedDescription()->utf8String() << std::endl; return; }
+
     MTL::Function* pMergeFn = pLibrary->newFunction(NS::String::string("q9_merge_results_kernel", NS::UTF8StringEncoding));
     MTL::ComputePipelineState* pMergePipe = pDevice->newComputePipelineState(pMergeFn, &pError);
+    if (!pMergePipe) { std::cerr << "Failed to create pMergePipe: " << pError->localizedDescription()->utf8String() << std::endl; return; }
 
     // 3. Create all GPU buffers
-    const uint part_ht_size = part_size * 2;
-    std::vector<int> cpu_part_ht(part_ht_size * 2, -1);
+    // Part Bitmap (Optimization 1)
+    int max_partkey = 0;
+    for(int k : p_partkey) max_partkey = std::max(max_partkey, k);
+    std::cout << "Max PartKey: " << max_partkey << std::endl;
+    const uint part_bitmap_ints = (max_partkey + 31) / 32 + 1;
+    MTL::Buffer* pPartBitmapBuffer = pDevice->newBuffer(part_bitmap_ints * sizeof(uint), MTL::ResourceStorageModeShared);
+    std::memset(pPartBitmapBuffer->contents(), 0, part_bitmap_ints * sizeof(uint));
+    
     MTL::Buffer* pPartKeyBuffer = pDevice->newBuffer(p_partkey.data(), part_size * sizeof(int), MTL::ResourceStorageModeShared);
     MTL::Buffer* pPartNameBuffer = pDevice->newBuffer(p_name.data(), p_name.size() * sizeof(char), MTL::ResourceStorageModeShared);
-    MTL::Buffer* pPartHTBuffer = pDevice->newBuffer(cpu_part_ht.data(), part_ht_size * sizeof(int) * 2, MTL::ResourceStorageModeShared);
+    // Dummy size for compatibility
+    const uint part_ht_size = 0; 
 
-    const uint supplier_ht_size = supplier_size * 2;
-    std::vector<int> cpu_supplier_ht(supplier_ht_size * 2, -1);
+    // Supplier Direct Map (Optimization 2)
+    int max_suppkey = 0;
+    for(int k : s_suppkey) max_suppkey = std::max(max_suppkey, k);
+    std::cout << "Max SuppKey: " << max_suppkey << std::endl;
+    const uint supp_map_size = max_suppkey + 1;
+    MTL::Buffer* pSuppMapBuffer = pDevice->newBuffer(supp_map_size * sizeof(int), MTL::ResourceStorageModeShared);
+    // Initialize with -1 to be safe
+    std::memset(pSuppMapBuffer->contents(), -1, supp_map_size * sizeof(int));
+
+    
     MTL::Buffer* pSuppKeyBuffer = pDevice->newBuffer(s_suppkey.data(), supplier_size * sizeof(int), MTL::ResourceStorageModeShared);
     MTL::Buffer* pSuppNationKeyBuffer = pDevice->newBuffer(s_nationkey.data(), supplier_size * sizeof(int), MTL::ResourceStorageModeShared);
-    MTL::Buffer* pSupplierHTBuffer = pDevice->newBuffer(cpu_supplier_ht.data(), supplier_ht_size * sizeof(int) * 2, MTL::ResourceStorageModeShared);
+    // Dummy size for compatibility
+    const uint supplier_ht_size = 0;
     
     const uint partsupp_ht_size = partsupp_size * 4; // larger table to reduce probe lengths
     // PartSuppEntry has 4 ints (partkey, suppkey, idx, pad); initialize all to -1 to mark empty
@@ -1068,54 +1113,100 @@ void runQ9Benchmark(MTL::Device* pDevice, MTL::CommandQueue* pCommandQueue, MTL:
     std::vector<uint> cpu_final_ht(final_ht_size * (sizeof(Q9Aggregates_CPU)/sizeof(uint)), 0);
     MTL::Buffer* pFinalHTBuffer = pDevice->newBuffer(cpu_final_ht.data(), final_ht_size * sizeof(Q9Aggregates_CPU), MTL::ResourceStorageModeShared);
 
-    // 4. Dispatch the entire 6-stage pipeline in a single command buffer
+    // 4. Dispatch the entire 6-stage pipeline
     auto q9_e2e_start = std::chrono::high_resolution_clock::now();
     MTL::CommandBuffer* pCommandBuffer = pCommandQueue->commandBuffer();
 
-    // Single encoder for all 6 stages: 1-4 builds, 5 probe+local agg, 6 merge
-    MTL::ComputeCommandEncoder* pEnc = pCommandBuffer->computeCommandEncoder();
-    // Stage 1: Part build
-    pEnc->setComputePipelineState(pPartBuildPipe);
-    pEnc->setBuffer(pPartKeyBuffer, 0, 0); pEnc->setBuffer(pPartNameBuffer, 0, 1);
-    pEnc->setBuffer(pPartHTBuffer, 0, 2); pEnc->setBytes(&part_size, sizeof(part_size), 3);
-    pEnc->setBytes(&part_ht_size, sizeof(part_ht_size), 4);
-    pEnc->dispatchThreads(MTL::Size(part_size, 1, 1), MTL::Size(1024, 1, 1));
-    // Stage 2: Supplier build
-    pEnc->setComputePipelineState(pSuppBuildPipe);
-    pEnc->setBuffer(pSuppKeyBuffer, 0, 0); pEnc->setBuffer(pSuppNationKeyBuffer, 0, 1);
-    pEnc->setBuffer(pSupplierHTBuffer, 0, 2); pEnc->setBytes(&supplier_size, sizeof(supplier_size), 3);
-    pEnc->setBytes(&supplier_ht_size, sizeof(supplier_ht_size), 4);
-    pEnc->dispatchThreads(MTL::Size(supplier_size, 1, 1), MTL::Size(1024, 1, 1));
+    // Encoder 1: Build Phase (Stages 1-4)
+    MTL::ComputeCommandEncoder* pBuildEnc = pCommandBuffer->computeCommandEncoder();
+    
+    // Stage 1: Part build (Bitmap)
+    pBuildEnc->setComputePipelineState(pPartBuildPipe);
+    pBuildEnc->setBuffer(pPartKeyBuffer, 0, 0); pBuildEnc->setBuffer(pPartNameBuffer, 0, 1);
+    pBuildEnc->setBuffer(pPartBitmapBuffer, 0, 2); pBuildEnc->setBytes(&part_size, sizeof(part_size), 3);
+    pBuildEnc->setBytes(&part_ht_size, sizeof(part_ht_size), 4);
+    {
+        NS::UInteger threadGroupSize = pPartBuildPipe->maxTotalThreadsPerThreadgroup();
+        if (threadGroupSize > 256) threadGroupSize = 256;
+        MTL::Size threadgroupSize = MTL::Size(threadGroupSize, 1, 1);
+        MTL::Size threadgroups = MTL::Size((part_size + threadGroupSize - 1) / threadGroupSize, 1, 1);
+        pBuildEnc->dispatchThreadgroups(threadgroups, threadgroupSize);
+    }
+    
+    // Stage 2: Supplier build (Direct Map)
+    pBuildEnc->setComputePipelineState(pSuppBuildPipe);
+    pBuildEnc->setBuffer(pSuppKeyBuffer, 0, 0); pBuildEnc->setBuffer(pSuppNationKeyBuffer, 0, 1);
+    pBuildEnc->setBuffer(pSuppMapBuffer, 0, 2); pBuildEnc->setBytes(&supplier_size, sizeof(supplier_size), 3);
+    pBuildEnc->setBytes(&supplier_ht_size, sizeof(supplier_ht_size), 4);
+    {
+        NS::UInteger threadGroupSize = pSuppBuildPipe->maxTotalThreadsPerThreadgroup();
+        if (threadGroupSize > 256) threadGroupSize = 256;
+        MTL::Size threadgroupSize = MTL::Size(threadGroupSize, 1, 1);
+        MTL::Size threadgroups = MTL::Size((supplier_size + threadGroupSize - 1) / threadGroupSize, 1, 1);
+        pBuildEnc->dispatchThreadgroups(threadgroups, threadgroupSize);
+    }
+    
     // Stage 3: PartSupp build
-    pEnc->setComputePipelineState(pPartSuppBuildPipe);
-    pEnc->setBuffer(pPsPartKeyBuffer, 0, 0); pEnc->setBuffer(pPsSuppKeyBuffer, 0, 1);
-    pEnc->setBuffer(pPartSuppHTBuffer, 0, 2); pEnc->setBytes(&partsupp_size, sizeof(partsupp_size), 3);
-    pEnc->setBytes(&partsupp_ht_size, sizeof(partsupp_ht_size), 4);
-    pEnc->dispatchThreads(MTL::Size(partsupp_size, 1, 1), MTL::Size(1024, 1, 1));
+    pBuildEnc->setComputePipelineState(pPartSuppBuildPipe);
+    pBuildEnc->setBuffer(pPsPartKeyBuffer, 0, 0); pBuildEnc->setBuffer(pPsSuppKeyBuffer, 0, 1);
+    pBuildEnc->setBuffer(pPartSuppHTBuffer, 0, 2); pBuildEnc->setBytes(&partsupp_size, sizeof(partsupp_size), 3);
+    pBuildEnc->setBytes(&partsupp_ht_size, sizeof(partsupp_ht_size), 4);
+    {
+        NS::UInteger threadGroupSize = pPartSuppBuildPipe->maxTotalThreadsPerThreadgroup();
+        if (threadGroupSize > 256) threadGroupSize = 256;
+        MTL::Size threadgroupSize = MTL::Size(threadGroupSize, 1, 1);
+        MTL::Size threadgroups = MTL::Size((partsupp_size + threadGroupSize - 1) / threadGroupSize, 1, 1);
+        pBuildEnc->dispatchThreadgroups(threadgroups, threadgroupSize);
+    }
+    
     // Stage 4: Orders build
-    pEnc->setComputePipelineState(pOrdersBuildPipe);
-    pEnc->setBuffer(pOrdKeyBuffer, 0, 0); pEnc->setBuffer(pOrdDateBuffer, 0, 1);
-    pEnc->setBuffer(pOrdersHTBuffer, 0, 2); pEnc->setBytes(&orders_size, sizeof(orders_size), 3);
-    pEnc->setBytes(&orders_ht_size, sizeof(orders_ht_size), 4);
-    pEnc->dispatchThreads(MTL::Size(orders_size, 1, 1), MTL::Size(1024, 1, 1));
+    pBuildEnc->setComputePipelineState(pOrdersBuildPipe);
+    pBuildEnc->setBuffer(pOrdKeyBuffer, 0, 0); pBuildEnc->setBuffer(pOrdDateBuffer, 0, 1);
+    pBuildEnc->setBuffer(pOrdersHTBuffer, 0, 2); pBuildEnc->setBytes(&orders_size, sizeof(orders_size), 3);
+    pBuildEnc->setBytes(&orders_ht_size, sizeof(orders_ht_size), 4);
+    {
+        NS::UInteger threadGroupSize = pOrdersBuildPipe->maxTotalThreadsPerThreadgroup();
+        if (threadGroupSize > 256) threadGroupSize = 256;
+        MTL::Size threadgroupSize = MTL::Size(threadGroupSize, 1, 1);
+        MTL::Size threadgroups = MTL::Size((orders_size + threadGroupSize - 1) / threadGroupSize, 1, 1);
+        pBuildEnc->dispatchThreadgroups(threadgroups, threadgroupSize);
+    }
+    
+    pBuildEnc->endEncoding();
+
+    // Ensure build phase is complete before probe phase
+    pCommandBuffer->commit();
+    pCommandBuffer->waitUntilCompleted();
+    
+    // Restart command buffer for probe phase
+    pCommandBuffer = pCommandQueue->commandBuffer();
+
+    // Encoder 2: Probe & Merge Phase (Stages 5-6)
+    // Splitting encoders ensures memory consistency between builds and probe
+    MTL::ComputeCommandEncoder* pProbeEnc = pCommandBuffer->computeCommandEncoder();
+    
     // Stage 5: Probe + local aggregation
-    pEnc->setComputePipelineState(pProbeAggPipe);
-    pEnc->setBuffer(pLineSuppKeyBuffer, 0, 0); pEnc->setBuffer(pLinePartKeyBuffer, 0, 1);
-    pEnc->setBuffer(pLineOrdKeyBuffer, 0, 2); pEnc->setBuffer(pLinePriceBuffer, 0, 3);
-    pEnc->setBuffer(pLineDiscBuffer, 0, 4); pEnc->setBuffer(pLineQtyBuffer, 0, 5);
-    pEnc->setBuffer(pPsSupplyCostBuffer, 0, 6); pEnc->setBuffer(pPartHTBuffer, 0, 7);
-    pEnc->setBuffer(pSupplierHTBuffer, 0, 8); pEnc->setBuffer(pPartSuppHTBuffer, 0, 9);
-    pEnc->setBuffer(pOrdersHTBuffer, 0, 10); pEnc->setBuffer(pIntermediateBuffer, 0, 11);
-    pEnc->setBytes(&lineitem_size, sizeof(lineitem_size), 12); pEnc->setBytes(&part_ht_size, sizeof(part_ht_size), 13);
-    pEnc->setBytes(&supplier_ht_size, sizeof(supplier_ht_size), 14); pEnc->setBytes(&partsupp_ht_size, sizeof(partsupp_ht_size), 15);
-    pEnc->setBytes(&orders_ht_size, sizeof(orders_ht_size), 16);
-    pEnc->dispatchThreadgroups(MTL::Size(num_threadgroups, 1, 1), MTL::Size(1024, 1, 1));
+    pProbeEnc->setComputePipelineState(pProbeAggPipe);
+    pProbeEnc->setBuffer(pLineSuppKeyBuffer, 0, 0); pProbeEnc->setBuffer(pLinePartKeyBuffer, 0, 1);
+    pProbeEnc->setBuffer(pLineOrdKeyBuffer, 0, 2); pProbeEnc->setBuffer(pLinePriceBuffer, 0, 3);
+    pProbeEnc->setBuffer(pLineDiscBuffer, 0, 4); pProbeEnc->setBuffer(pLineQtyBuffer, 0, 5);
+    pProbeEnc->setBuffer(pPsSupplyCostBuffer, 0, 6); 
+    pProbeEnc->setBuffer(pPartBitmapBuffer, 0, 7); // Bitmap
+    pProbeEnc->setBuffer(pSuppMapBuffer, 0, 8);    // Direct Map
+    pProbeEnc->setBuffer(pPartSuppHTBuffer, 0, 9);
+    pProbeEnc->setBuffer(pOrdersHTBuffer, 0, 10); pProbeEnc->setBuffer(pIntermediateBuffer, 0, 11);
+    pProbeEnc->setBytes(&lineitem_size, sizeof(lineitem_size), 12); pProbeEnc->setBytes(&part_ht_size, sizeof(part_ht_size), 13);
+    pProbeEnc->setBytes(&supplier_ht_size, sizeof(supplier_ht_size), 14); pProbeEnc->setBytes(&partsupp_ht_size, sizeof(partsupp_ht_size), 15);
+    pProbeEnc->setBytes(&orders_ht_size, sizeof(orders_ht_size), 16);
+    pProbeEnc->dispatchThreadgroups(MTL::Size(num_threadgroups, 1, 1), MTL::Size(1024, 1, 1));
+    
     // Stage 6: Merge
-    pEnc->setComputePipelineState(pMergePipe);
-    pEnc->setBuffer(pIntermediateBuffer, 0, 0); pEnc->setBuffer(pFinalHTBuffer, 0, 1);
-    pEnc->setBytes(&intermediate_size, sizeof(intermediate_size), 2); pEnc->setBytes(&final_ht_size, sizeof(final_ht_size), 3);
-    pEnc->dispatchThreads(MTL::Size(intermediate_size, 1, 1), MTL::Size(1024, 1, 1));
-    pEnc->endEncoding();
+    pProbeEnc->setComputePipelineState(pMergePipe);
+    pProbeEnc->setBuffer(pIntermediateBuffer, 0, 0); pProbeEnc->setBuffer(pFinalHTBuffer, 0, 1);
+    pProbeEnc->setBytes(&intermediate_size, sizeof(intermediate_size), 2); pProbeEnc->setBytes(&final_ht_size, sizeof(final_ht_size), 3);
+    pProbeEnc->dispatchThreads(MTL::Size(intermediate_size, 1, 1), MTL::Size(1024, 1, 1));
+    
+    pProbeEnc->endEncoding();
 
     // Execute and time total Q9
     pCommandBuffer->commit();
@@ -1187,10 +1278,10 @@ void runQ9Benchmark(MTL::Device* pDevice, MTL::CommandQueue* pCommandQueue, MTL:
     // Release all buffers
     pPartKeyBuffer->release();
     pPartNameBuffer->release();
-    pPartHTBuffer->release();
+    pPartBitmapBuffer->release();
     pSuppKeyBuffer->release();
     pSuppNationKeyBuffer->release();
-    pSupplierHTBuffer->release();
+    pSuppMapBuffer->release();
     pPsPartKeyBuffer->release();
     pPsSuppKeyBuffer->release();
     pPsSupplyCostBuffer->release();

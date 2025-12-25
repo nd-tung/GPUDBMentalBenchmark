@@ -56,6 +56,7 @@ $(KERNEL_METALLIB): $(KERNEL_AIR)
 	$(METALLIB) $(KERNEL_AIR) -o $(KERNEL_METALLIB)
 	@# Copy to runtime location so device->newLibrary("default.metallib") finds the latest
 	cp $(KERNEL_METALLIB) GPUDBMentalBenchmark/default.metallib
+	cp $(KERNEL_METALLIB) default.metallib
 
 # Compile source files
 $(OBJ_DIR)/%.o: $(SOURCE_DIR)/%.cpp | $(OBJ_DIR)

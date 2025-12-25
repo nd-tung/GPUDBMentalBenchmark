@@ -1465,15 +1465,18 @@ struct Q9Aggregates_Local {
     float profit;
 };
 
-// KERNEL 1: Build HT on PART, filtering for p_name LIKE '%green%'
+// KERNEL 1: Build Bitmap on PART, filtering for p_name LIKE '%green%'
 kernel void q9_build_part_ht_kernel(
-    const device int* p_partkey,
-    const device char* p_name, // Assuming p_name is a fixed-size char array
-    device HashTableEntry* part_ht,
-    constant uint& part_size,
-    constant uint& part_ht_size,
-    uint index [[thread_position_in_grid]])
+    const device int* p_partkey [[buffer(0)]],
+    const device char* p_name [[buffer(1)]], // Assuming p_name is a fixed-size char array
+    device atomic_uint* part_bitmap [[buffer(2)]], // Bitmap: 1 bit per partkey
+    constant uint& part_size [[buffer(3)]],
+    constant uint& part_ht_size [[buffer(4)]], // Unused, kept for signature compatibility if needed, or remove
+    uint group_id [[threadgroup_position_in_grid]],
+    uint thread_id_in_group [[thread_index_in_threadgroup]],
+    uint threads_per_group [[threads_per_threadgroup]])
 {
+    uint index = group_id * threads_per_group + thread_id_in_group;
     if (index >= part_size) return;
     bool match = false;
     for(int i = 0; i < 50; ++i) { // Simplified string search
@@ -1484,42 +1487,31 @@ kernel void q9_build_part_ht_kernel(
             break;
         }
     }
-    if (!match) return;
-
-    int key = p_partkey[index];
-    int value = 1; // Flag that part exists
-    uint hash_index = (uint)key % part_ht_size;
-    for (uint i = 0; i < part_ht_size; ++i) {
-        uint probe_index = (hash_index + i) % part_ht_size;
-        int expected = -1;
-        if (atomic_compare_exchange_weak_explicit(&part_ht[probe_index].key, &expected, key, memory_order_relaxed, memory_order_relaxed)) {
-            atomic_store_explicit(&part_ht[probe_index].value, value, memory_order_relaxed);
-            return;
-        }
+    
+    if (match) {
+        int key = p_partkey[index];
+        // Set bit in bitmap
+        atomic_fetch_or_explicit(&part_bitmap[key / 32], (1u << (key % 32)), memory_order_relaxed);
     }
 }
 
-// KERNEL 2: Build HT on SUPPLIER, storing nationkey as the value.
+// KERNEL 2: Build Direct Map on SUPPLIER, storing nationkey as the value.
 kernel void q9_build_supplier_ht_kernel(
-    const device int* s_suppkey,
-    const device int* s_nationkey,
-    device HashTableEntry* supplier_ht,
-    constant uint& supplier_size,
-    constant uint& supplier_ht_size,
-    uint index [[thread_position_in_grid]])
+    const device int* s_suppkey [[buffer(0)]],
+    const device int* s_nationkey [[buffer(1)]],
+    device int* supplier_nation_map [[buffer(2)]], // Direct map: index is suppkey
+    constant uint& supplier_size [[buffer(3)]],
+    constant uint& supplier_ht_size [[buffer(4)]], // Unused
+    uint group_id [[threadgroup_position_in_grid]],
+    uint thread_id_in_group [[thread_index_in_threadgroup]],
+    uint threads_per_group [[threads_per_threadgroup]])
 {
+    uint index = group_id * threads_per_group + thread_id_in_group;
     if (index >= supplier_size) return;
     int key = s_suppkey[index];
-    int value = s_nationkey[index];
-    uint hash_index = (uint)key % supplier_ht_size;
-    for (uint i = 0; i < supplier_ht_size; ++i) {
-        uint probe_index = (hash_index + i) % supplier_ht_size;
-        int expected = -1;
-        if (atomic_compare_exchange_weak_explicit(&supplier_ht[probe_index].key, &expected, key, memory_order_relaxed, memory_order_relaxed)) {
-            atomic_store_explicit(&supplier_ht[probe_index].value, value, memory_order_relaxed);
-            return;
-        }
-    }
+    // Safety check (though we allocated max_suppkey + 1)
+    // Assuming key is positive and within bounds.
+    supplier_nation_map[key] = s_nationkey[index];
 }
 
 // KERNEL 3: Build HT on PARTSUPP, storing supplycost index as value
@@ -1531,13 +1523,16 @@ struct PartSuppEntry {
 };
 
 kernel void q9_build_partsupp_ht_kernel(
-    const device int* ps_partkey,
-    const device int* ps_suppkey,
-    device PartSuppEntry* partsupp_ht,
-    constant uint& partsupp_size,
-    constant uint& partsupp_ht_size,
-    uint index [[thread_position_in_grid]])
+    const device int* ps_partkey [[buffer(0)]],
+    const device int* ps_suppkey [[buffer(1)]],
+    device PartSuppEntry* partsupp_ht [[buffer(2)]],
+    constant uint& partsupp_size [[buffer(3)]],
+    constant uint& partsupp_ht_size [[buffer(4)]],
+    uint group_id [[threadgroup_position_in_grid]],
+    uint thread_id_in_group [[thread_index_in_threadgroup]],
+    uint threads_per_group [[threads_per_threadgroup]])
 {
+    uint index = group_id * threads_per_group + thread_id_in_group;
     if (index >= partsupp_size) return;
     int pk = ps_partkey[index];
     int sk = ps_suppkey[index];
@@ -1571,13 +1566,16 @@ kernel void q9_build_partsupp_ht_kernel(
 
 // KERNEL 4: Build HT on ORDERS, storing year as value
 kernel void q9_build_orders_ht_kernel(
-    const device int* o_orderkey,
-    const device int* o_orderdate,
-    device HashTableEntry* orders_ht,
-    constant uint& orders_size,
-    constant uint& orders_ht_size,
-    uint index [[thread_position_in_grid]])
+    const device int* o_orderkey [[buffer(0)]],
+    const device int* o_orderdate [[buffer(1)]],
+    device HashTableEntry* orders_ht [[buffer(2)]],
+    constant uint& orders_size [[buffer(3)]],
+    constant uint& orders_ht_size [[buffer(4)]],
+    uint group_id [[threadgroup_position_in_grid]],
+    uint thread_id_in_group [[thread_index_in_threadgroup]],
+    uint threads_per_group [[threads_per_threadgroup]])
 {
+    uint index = group_id * threads_per_group + thread_id_in_group;
     if (index >= orders_size) return;
     int key = o_orderkey[index];
     int value = o_orderdate[index] / 10000; // Extract year
@@ -1601,7 +1599,8 @@ kernel void q9_probe_and_local_agg_kernel(
     // partsupp supplycost array
     const device float* ps_supplycost,
     // Pre-built hash tables
-    const device HashTableEntry* part_ht, const device HashTableEntry* supplier_ht,
+    const device uint* part_bitmap, 
+    const device int* supplier_nation_map,
     const device PartSuppEntry* partsupp_ht, const device HashTableEntry* orders_ht,
     // Output buffer
     device Q9Aggregates_Local* intermediate_results,
@@ -1622,94 +1621,84 @@ kernel void q9_probe_and_local_agg_kernel(
     }
     threadgroup_barrier(mem_flags::mem_threadgroup);
 
-    uint grid_size = threads_per_group * 2048;
-    for (uint i = (group_id * threads_per_group) + thread_id_in_group; i < lineitem_size; i += grid_size) {
-        int partkey = l_partkey[i], suppkey = l_suppkey[i], orderkey = l_orderkey[i];
+    const uint grid_size = threads_per_group * 2048;
+    const uint global_tid = (group_id * threads_per_group) + thread_id_in_group;
+    const uint BATCH = 4;
+    const uint stride = grid_size * BATCH;
 
-        // --- FAST PARALLEL PROBES ---
-        
-        // 1. Probe part_ht to check if part matches 'green' filter
-        bool part_match = false;
-        uint part_hash = (uint)partkey % part_ht_size;
-        for (uint j = 0; j < part_ht_size; ++j) {
-            uint probe_idx = (part_hash + j) % part_ht_size;
-            int p_key = atomic_load_explicit(&part_ht[probe_idx].key, memory_order_relaxed);
-            if (p_key == partkey) {
-                part_match = true;
-                break;
-            }
-            if (p_key == -1) break;
-        }
-        if (!part_match) continue;
+    for (uint base = global_tid * BATCH; base < lineitem_size; base += stride) {
+        for(int k=0; k<BATCH; ++k) {
+            uint i = base + k;
+            if (i >= lineitem_size) break;
 
-        // 2. Probe supplier_ht to get nationkey
-        int nationkey = -1;
-        uint supp_hash = (uint)suppkey % supplier_ht_size;
-        for (uint j = 0; j < supplier_ht_size; ++j) {
-            uint probe_idx = (supp_hash + j) % supplier_ht_size;
-            int s_key = atomic_load_explicit(&supplier_ht[probe_idx].key, memory_order_relaxed);
-            if (s_key == suppkey) {
-                nationkey = atomic_load_explicit(&supplier_ht[probe_idx].value, memory_order_relaxed);
-                break;
-            }
-            if (s_key == -1) break;
-        }
-        if (nationkey == -1) continue;
+            int partkey = l_partkey[i];
 
-        // 3. Probe partsupp_ht to get supply cost index (use combined hash of (partkey,suppkey))
-        int ps_idx = -1;
-        uint ps_hash = ((uint)partkey * 0x9E3779B1u ^ (uint)suppkey * 0x85EBCA77u) % partsupp_ht_size;
-        for (uint j = 0; j < partsupp_ht_size; ++j) {
-            uint probe_idx = (ps_hash + j) % partsupp_ht_size;
-            int pk2 = atomic_load_explicit(&partsupp_ht[probe_idx].partkey, memory_order_relaxed);
-            if (pk2 == -1) break; // empty slot -> not found
-            if (pk2 == partkey) {
-                int sk2 = atomic_load_explicit(&partsupp_ht[probe_idx].suppkey, memory_order_relaxed);
-                if (sk2 == suppkey) {
-                    ps_idx = atomic_load_explicit(&partsupp_ht[probe_idx].idx, memory_order_relaxed);
-                    break;
+            // 1. Check Bitmap
+            if (!((part_bitmap[partkey / 32] >> (partkey % 32)) & 1)) continue;
+
+            int suppkey = l_suppkey[i];
+
+            // 2. Direct Lookup
+            int nationkey = supplier_nation_map[suppkey];
+            if (nationkey == -1) continue;
+
+
+            // 3. Probe partsupp_ht to get supply cost index (use combined hash of (partkey,suppkey))
+            int ps_idx = -1;
+            uint ps_hash = ((uint)partkey * 0x9E3779B1u ^ (uint)suppkey * 0x85EBCA77u) % partsupp_ht_size;
+            for (uint j = 0; j < partsupp_ht_size; ++j) {
+                uint probe_idx = (ps_hash + j) % partsupp_ht_size;
+                int pk2 = atomic_load_explicit(&partsupp_ht[probe_idx].partkey, memory_order_relaxed);
+                if (pk2 == -1) break; // empty slot -> not found
+                if (pk2 == partkey) {
+                    int sk2 = atomic_load_explicit(&partsupp_ht[probe_idx].suppkey, memory_order_relaxed);
+                    if (sk2 == suppkey) {
+                        ps_idx = atomic_load_explicit(&partsupp_ht[probe_idx].idx, memory_order_relaxed);
+                        break;
+                    }
                 }
             }
-        }
-        if (ps_idx == -1) continue;
+            if (ps_idx == -1) continue;
 
-        // 4. Probe orders_ht to get year
-        int year = -1;
-        uint ord_hash = (uint)orderkey % orders_ht_size;
-        for (uint j = 0; j < orders_ht_size; ++j) {
-            uint probe_idx = (ord_hash + j) % orders_ht_size;
-            int o_key = atomic_load_explicit(&orders_ht[probe_idx].key, memory_order_relaxed);
-            if (o_key == orderkey) {
-                year = atomic_load_explicit(&orders_ht[probe_idx].value, memory_order_relaxed);
-                break;
-            }
-            if (o_key == -1) break;
-        }
-        if (year == -1) continue;
-
-        // All probes succeeded!
-        
-        // --- AGGREGATE ---
-        float profit = l_extendedprice[i] * (1.0f - l_discount[i]) - ps_supplycost[ps_idx] * l_quantity[i];
-        uint agg_key = (uint)(nationkey << 16) | year;
-        uint agg_hash = agg_key % local_ht_size;
-
-        for(int k = 0; k < local_ht_size; ++k) {
-            uint probe_idx = (agg_hash + k) % local_ht_size;
-            int expected = 0;
-            if (atomic_compare_exchange_weak_explicit(&tg_locks[probe_idx], &expected, 1, memory_order_relaxed, memory_order_relaxed)) {
-                if (local_ht[probe_idx].key == 0) {
-                    local_ht[probe_idx].key = agg_key;
-                    local_ht[probe_idx].profit = profit;
-                    atomic_store_explicit(&tg_locks[probe_idx], 0, memory_order_relaxed);
-                    break;
-                } else if (local_ht[probe_idx].key == agg_key) {
-                    local_ht[probe_idx].profit += profit;
-                    atomic_store_explicit(&tg_locks[probe_idx], 0, memory_order_relaxed);
+            // 4. Probe orders_ht to get year
+            int orderkey = l_orderkey[i];
+            int year = -1;
+            uint ord_hash = (uint)orderkey % orders_ht_size;
+            for (uint j = 0; j < orders_ht_size; ++j) {
+                uint probe_idx = (ord_hash + j) % orders_ht_size;
+                int o_key = atomic_load_explicit(&orders_ht[probe_idx].key, memory_order_relaxed);
+                if (o_key == orderkey) {
+                    year = atomic_load_explicit(&orders_ht[probe_idx].value, memory_order_relaxed);
                     break;
                 }
-                // release and continue probing
-                atomic_store_explicit(&tg_locks[probe_idx], 0, memory_order_relaxed);
+                if (o_key == -1) break;
+            }
+            if (year == -1) continue;
+
+            // All probes succeeded!
+            
+            // --- AGGREGATE ---
+            float profit = l_extendedprice[i] * (1.0f - l_discount[i]) - ps_supplycost[ps_idx] * l_quantity[i];
+            uint agg_key = (uint)(nationkey << 16) | year;
+            uint agg_hash = agg_key % local_ht_size;
+
+            for(int m = 0; m < local_ht_size; ++m) {
+                uint probe_idx = (agg_hash + m) % local_ht_size;
+                int expected = 0;
+                if (atomic_compare_exchange_weak_explicit(&tg_locks[probe_idx], &expected, 1, memory_order_relaxed, memory_order_relaxed)) {
+                    if (local_ht[probe_idx].key == 0) {
+                        local_ht[probe_idx].key = agg_key;
+                        local_ht[probe_idx].profit = profit;
+                        atomic_store_explicit(&tg_locks[probe_idx], 0, memory_order_relaxed);
+                        break;
+                    } else if (local_ht[probe_idx].key == agg_key) {
+                        local_ht[probe_idx].profit += profit;
+                        atomic_store_explicit(&tg_locks[probe_idx], 0, memory_order_relaxed);
+                        break;
+                    }
+                    // release and continue probing
+                    atomic_store_explicit(&tg_locks[probe_idx], 0, memory_order_relaxed);
+                }
             }
         }
     }
