@@ -1778,8 +1778,7 @@ ORDER BY
 
 */
 
-// Structs for the two levels of aggregation
-struct Q13_OrderCount { // Stage 1 result
+struct Q13_OrderCount {
     atomic_uint custkey;
     atomic_uint order_count;
 };
@@ -1788,63 +1787,187 @@ struct Q13_OrderCount_Local {
     uint order_count;
 };
 
-struct Q13_CustDist { // Stage 2 final result
-    atomic_uint c_count; // The number of orders
-    atomic_uint custdist; // The number of customers with that many orders
+struct Q13_CustDist {
+    atomic_uint c_count;
+    atomic_uint custdist;
 };
 struct Q13_CustDist_Local {
     uint c_count;
     uint custdist;
 };
 
+// --- Q13 substring matching helpers ---
 
-// KERNEL 1A: Stage 1, Local Count. Scans ORDERS, filters, and does first GROUP BY locally.
+inline int q13_effective_len_fixed_100(const device uchar* s) {
+    const int max_len = 100;
+    const int min_pattern_len = 15;
+    for (int i = 0; i < max_len; i++) {
+        if (s[i] == 0) {
+            return (i < min_pattern_len) ? -1 : i;
+        }
+    }
+    return max_len;
+}
+
+inline bool q13_has_special_requests(const device uchar* s, int comment_len) {
+    const int last_special = comment_len - 15;
+    
+    for (int i = 0; i <= last_special; i++) {
+        if (s[i+3] == 'c') {
+            if (s[i] == 's' && s[i+1] == 'p' && s[i+2] == 'e' && 
+                s[i+4] == 'i' && s[i+5] == 'a' && s[i+6] == 'l') {
+                
+                int req_start = i + 7;
+                int req_end = comment_len - 8;
+                for (int j = req_start; j <= req_end; j++) {
+                    if (s[j+2] == 'q') {
+                        if (s[j] == 'r' && s[j+1] == 'e' && s[j+3] == 'u' &&
+                            s[j+4] == 'e' && s[j+5] == 's' && s[j+6] == 't' && s[j+7] == 's') {
+                            return true;
+                        }
+                    }
+                }
+                return false;
+            }
+        }
+    }
+    return false;
+}
+
+
+kernel void q13_fused_direct_count_kernel(
+    const device int* o_custkey,
+    const device char* o_comment,
+    device atomic_uint* customer_order_counts,
+    constant uint& orders_size,
+    constant uint& customer_size,
+    uint group_id [[threadgroup_position_in_grid]],
+    uint thread_id_in_group [[thread_index_in_threadgroup]],
+    uint threads_per_group [[threads_per_threadgroup]])
+{
+    const int comment_len = 100;
+    const uint grid_size = threads_per_group * 2048;
+    const uint global_tid = (group_id * threads_per_group) + thread_id_in_group;
+    const uint BATCH = 4;
+    const uint stride = grid_size * BATCH;
+
+    for (uint base = global_tid * BATCH; base < orders_size; base += stride) {
+        if (base + 0 < orders_size) {
+            const uint i = base + 0;
+            const uint ck = (uint)o_custkey[i];
+            if (ck >= 1u && ck <= customer_size) {
+                const device uchar* row = (const device uchar*)(o_comment + (i * comment_len));
+                int effective_len = q13_effective_len_fixed_100(row);
+                if (effective_len > 0) {
+                    bool skip = q13_has_special_requests(row, effective_len);
+                    if (!skip) {
+                        atomic_fetch_add_explicit(&customer_order_counts[ck - 1u], 1u, memory_order_relaxed);
+                    }
+                } else {
+                    atomic_fetch_add_explicit(&customer_order_counts[ck - 1u], 1u, memory_order_relaxed);
+                }
+            }
+        }
+        if (base + 1 < orders_size) {
+            const uint i = base + 1;
+            const uint ck = (uint)o_custkey[i];
+            if (ck >= 1u && ck <= customer_size) {
+                const device uchar* row = (const device uchar*)(o_comment + (i * comment_len));
+                int effective_len = q13_effective_len_fixed_100(row);
+                if (effective_len > 0) {
+                    bool skip = q13_has_special_requests(row, effective_len);
+                    if (!skip) {
+                        atomic_fetch_add_explicit(&customer_order_counts[ck - 1u], 1u, memory_order_relaxed);
+                    }
+                } else {
+                    atomic_fetch_add_explicit(&customer_order_counts[ck - 1u], 1u, memory_order_relaxed);
+                }
+            }
+        }
+        if (base + 2 < orders_size) {
+            const uint i = base + 2;
+            const uint ck = (uint)o_custkey[i];
+            if (ck >= 1u && ck <= customer_size) {
+                const device uchar* row = (const device uchar*)(o_comment + (i * comment_len));
+                int effective_len = q13_effective_len_fixed_100(row);
+                if (effective_len > 0) {
+                    bool skip = q13_has_special_requests(row, effective_len);
+                    if (!skip) {
+                        atomic_fetch_add_explicit(&customer_order_counts[ck - 1u], 1u, memory_order_relaxed);
+                    }
+                } else {
+                    atomic_fetch_add_explicit(&customer_order_counts[ck - 1u], 1u, memory_order_relaxed);
+                }
+            }
+        }
+        if (base + 3 < orders_size) {
+            const uint i = base + 3;
+            const uint ck = (uint)o_custkey[i];
+            if (ck >= 1u && ck <= customer_size) {
+                const device uchar* row = (const device uchar*)(o_comment + (i * comment_len));
+                int effective_len = q13_effective_len_fixed_100(row);
+                if (effective_len > 0) {
+                    bool skip = q13_has_special_requests(row, effective_len);
+                    if (!skip) {
+                        atomic_fetch_add_explicit(&customer_order_counts[ck - 1u], 1u, memory_order_relaxed);
+                    }
+                } else {
+                    atomic_fetch_add_explicit(&customer_order_counts[ck - 1u], 1u, memory_order_relaxed);
+                }
+            }
+        }
+    }
+}
+
+
 kernel void q13_local_count_kernel(
     const device int* o_custkey,
-    const device char* o_comment, // fixed-width buffer
+    const device char* o_comment,
     device Q13_OrderCount_Local* intermediate_counts,
     constant uint& orders_size,
     uint group_id [[threadgroup_position_in_grid]],
     uint thread_id_in_group [[thread_index_in_threadgroup]],
     uint threads_per_group [[threads_per_threadgroup]])
 {
-    const int comment_len = 100; // matches host fixed-width
-    uint grid_size = threads_per_group * 2048; // matches host dispatch
+    const int comment_len = 100;
+    const uint grid_size = threads_per_group * 2048;
+    const uint global_tid = (group_id * threads_per_group) + thread_id_in_group;
+    const uint BATCH = 4;
+    const uint stride = grid_size * BATCH;
 
-    for (uint i = (group_id * threads_per_group) + thread_id_in_group; i < orders_size; i += grid_size) {
-        // Evaluate filter: NOT LIKE '%special%requests%'
-        bool skip = false;
-        for (int j = 0; j <= comment_len - 7; ++j) {
-            if (o_comment[i * comment_len + j + 0] == 's' &&
-                o_comment[i * comment_len + j + 1] == 'p' &&
-                o_comment[i * comment_len + j + 2] == 'e' &&
-                o_comment[i * comment_len + j + 3] == 'c' &&
-                o_comment[i * comment_len + j + 4] == 'i' &&
-                o_comment[i * comment_len + j + 5] == 'a' &&
-                o_comment[i * comment_len + j + 6] == 'l') {
-                for (int k = j + 7; k <= comment_len - 8; ++k) {
-                    if (o_comment[i * comment_len + k + 0] == 'r' &&
-                        o_comment[i * comment_len + k + 1] == 'e' &&
-                        o_comment[i * comment_len + k + 2] == 'q' &&
-                        o_comment[i * comment_len + k + 3] == 'u' &&
-                        o_comment[i * comment_len + k + 4] == 'e' &&
-                        o_comment[i * comment_len + k + 5] == 's' &&
-                        o_comment[i * comment_len + k + 6] == 't' &&
-                        o_comment[i * comment_len + k + 7] == 's') {
-                        skip = true;
-                        break;
-                    }
-                }
-                if (skip) break;
-            }
+    for (uint base = global_tid * BATCH; base < orders_size; base += stride) {
+        // Manually unrolled batch loop (compiler keeps these as straight-line code on Apple GPUs).
+        if (base + 0 < orders_size) {
+            const uint i = base + 0;
+            const device uchar* row = (const device uchar*)(o_comment + (i * comment_len));
+            int effective_len = q13_effective_len_fixed_100(row);
+            bool skip = q13_has_special_requests(row, effective_len);
+            if (!skip) { intermediate_counts[i].custkey = (uint)o_custkey[i]; intermediate_counts[i].order_count = 1; }
+            else       { intermediate_counts[i].custkey = 0;               intermediate_counts[i].order_count = 0; }
         }
-
-        if (!skip) {
-            intermediate_counts[i].custkey = (uint)o_custkey[i];
-            intermediate_counts[i].order_count = 1;
-        } else {
-            intermediate_counts[i].custkey = 0;
-            intermediate_counts[i].order_count = 0;
+        if (base + 1 < orders_size) {
+            const uint i = base + 1;
+            const device uchar* row = (const device uchar*)(o_comment + (i * comment_len));
+            int effective_len = q13_effective_len_fixed_100(row);
+            bool skip = q13_has_special_requests(row, effective_len);
+            if (!skip) { intermediate_counts[i].custkey = (uint)o_custkey[i]; intermediate_counts[i].order_count = 1; }
+            else       { intermediate_counts[i].custkey = 0;               intermediate_counts[i].order_count = 0; }
+        }
+        if (base + 2 < orders_size) {
+            const uint i = base + 2;
+            const device uchar* row = (const device uchar*)(o_comment + (i * comment_len));
+            int effective_len = q13_effective_len_fixed_100(row);
+            bool skip = q13_has_special_requests(row, effective_len);
+            if (!skip) { intermediate_counts[i].custkey = (uint)o_custkey[i]; intermediate_counts[i].order_count = 1; }
+            else       { intermediate_counts[i].custkey = 0;               intermediate_counts[i].order_count = 0; }
+        }
+        if (base + 3 < orders_size) {
+            const uint i = base + 3;
+            const device uchar* row = (const device uchar*)(o_comment + (i * comment_len));
+            int effective_len = q13_effective_len_fixed_100(row);
+            bool skip = q13_has_special_requests(row, effective_len);
+            if (!skip) { intermediate_counts[i].custkey = (uint)o_custkey[i]; intermediate_counts[i].order_count = 1; }
+            else       { intermediate_counts[i].custkey = 0;               intermediate_counts[i].order_count = 0; }
         }
     }
 }
@@ -1875,87 +1998,3 @@ kernel void q13_merge_counts_kernel(
         }
     }
 }
-
-
-// KERNEL 2A: Stage 2, Local Histogram. Scans CUSTOMER, probes counts HT, builds local histogram.
-#if 0 // UNUSED: Q13 histogram on GPU (host performs CPU histogram now)
-kernel void q13_local_histogram_kernel(
-    const device int* c_custkey,
-    const device Q13_OrderCount* customer_order_counts_ht,
-    device Q13_CustDist_Local* intermediate_histograms,
-    constant uint& customer_size,
-    constant uint& counts_ht_size,
-    uint group_id [[threadgroup_position_in_grid]],
-    uint thread_id_in_group [[thread_index_in_threadgroup]],
-    uint threads_per_group [[threads_per_threadgroup]])
-{
-    const int local_ht_size = 64; // Increase to cover observed max c_count (~41 at SF-1)
-    thread Q13_CustDist_Local local_ht[local_ht_size];
-    for (int i = thread_id_in_group; i < local_ht_size; i += threads_per_group) {
-        local_ht[i].c_count = i;
-        local_ht[i].custdist = 0;
-    }
-    threadgroup_barrier(mem_flags::mem_threadgroup);
-
-    uint grid_size = threads_per_group * 2048;
-    for (uint i = (group_id * threads_per_group) + thread_id_in_group; i < customer_size; i += grid_size) {
-        uint custkey = (uint)c_custkey[i];
-        
-        // Probe the counts HT to find this customer's order count
-        uint hash_index = custkey % counts_ht_size;
-        uint order_count = 0; // Default to 0 for LEFT JOIN
-        for (uint j = 0; j < counts_ht_size; ++j) {
-            uint probe_idx = (hash_index + j) % counts_ht_size;
-            uint ht_key = atomic_load_explicit(&customer_order_counts_ht[probe_idx].custkey, memory_order_relaxed);
-            if (ht_key == custkey) {
-                order_count = atomic_load_explicit(&customer_order_counts_ht[probe_idx].order_count, memory_order_relaxed);
-                break;
-            }
-            if (ht_key == 0) break; // Reached empty slot
-        }
-        
-        // Update local histogram
-        if (order_count < local_ht_size) {
-            local_ht[order_count].custdist++;
-        }
-    }
-    threadgroup_barrier(mem_flags::mem_threadgroup);
-    
-    for (int i = thread_id_in_group; i < local_ht_size; i += threads_per_group) {
-        if (local_ht[i].custdist > 0) {
-            intermediate_histograms[group_id * local_ht_size + i] = local_ht[i];
-        }
-    }
-}
-#endif // q13_local_histogram_kernel
-
-
-// KERNEL 2B: Stage 2, Merge Histogram. Merges partial histograms into final result.
-#if 0 // UNUSED: Q13 histogram merge on GPU (host performs CPU histogram now)
-kernel void q13_merge_histogram_kernel(
-    const device Q13_CustDist_Local* intermediate_histograms,
-    device Q13_CustDist* final_histogram_ht,
-    constant uint& intermediate_size,
-    constant uint& final_ht_size,
-    uint index [[thread_position_in_grid]])
-{
-    if (index >= intermediate_size) return;
-    Q13_CustDist_Local local_result = intermediate_histograms[index];
-    if (local_result.custdist == 0) return;
-
-    uint c_count = local_result.c_count;
-    uint hash_index = c_count % final_ht_size;
-
-    for (uint i = 0; i < final_ht_size; ++i) {
-        uint probe_index = (hash_index + i) % final_ht_size;
-        uint expected = -1; // Use -1 as empty marker
-        if (atomic_compare_exchange_weak_explicit(&final_histogram_ht[probe_index].c_count, &expected, c_count, memory_order_relaxed, memory_order_relaxed)) {
-            atomic_store_explicit(&final_histogram_ht[probe_index].custdist, 0, memory_order_relaxed);
-        }
-        if (atomic_load_explicit(&final_histogram_ht[probe_index].c_count, memory_order_relaxed) == c_count) {
-            atomic_fetch_add_explicit(&final_histogram_ht[probe_index].custdist, local_result.custdist, memory_order_relaxed);
-            return;
-        }
-    }
-}
-#endif // q13_merge_histogram_kernel

@@ -34,6 +34,7 @@ METAL = xcrun -sdk macosx metal
 METALLIB = xcrun -sdk macosx metallib
 KERNEL_AIR = $(BUILD_DIR)/kernels.air
 KERNEL_METALLIB = $(BUILD_DIR)/kernels.metallib
+BUILD_SENTINEL = $(BUILD_DIR)/.dir
 
 # Default target
 .PHONY: all
@@ -46,7 +47,7 @@ $(TARGET): $(OBJECTS) | $(BIN_DIR)
 	@echo "Build complete: $@"
 
 # Build Metal kernels and place fresh metallib alongside the app assets
-$(KERNEL_AIR): $(KERNEL_DIR)/DatabaseKernels.metal | $(BUILD_DIR)
+$(KERNEL_AIR): $(KERNEL_DIR)/DatabaseKernels.metal | $(BUILD_SENTINEL)
 	@echo "Compiling Metal kernels (.air)..."
 	$(METAL) -c $(KERNEL_DIR)/DatabaseKernels.metal -o $(KERNEL_AIR)
 
@@ -68,8 +69,9 @@ $(BIN_DIR):
 $(OBJ_DIR):
 	@mkdir -p $(OBJ_DIR)
 
-$(BUILD_DIR):
+$(BUILD_SENTINEL):
 	@mkdir -p $(BUILD_DIR)
+	@touch $(BUILD_SENTINEL)
 
 # Clean build artifacts
 .PHONY: clean
@@ -235,9 +237,10 @@ compile: $(OBJECTS)
 test-build: compile
 	@echo "Test build successful - source compiles without errors"
 
-# Build target (same as all, kept for compatibility)
+# Build target (kept for compatibility)
+# Include the Metal library so kernel changes are picked up by `make build`.
 .PHONY: build
-build: $(TARGET)
+build: $(TARGET) $(KERNEL_METALLIB)
 
 # Create a distributable package
 .PHONY: package

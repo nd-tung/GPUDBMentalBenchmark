@@ -1243,69 +1243,44 @@ void runQ13Benchmark(MTL::Device* pDevice, MTL::CommandQueue* pCommandQueue, MTL
 
     // 2. Setup kernels
     NS::Error* pError = nullptr;
-    MTL::Function* pLocalCountFn = pLibrary->newFunction(NS::String::string("q13_local_count_kernel", NS::UTF8StringEncoding));
-    MTL::ComputePipelineState* pLocalCountPipe = pDevice->newComputePipelineState(pLocalCountFn, &pError);
-    MTL::Function* pMergeCountFn = pLibrary->newFunction(NS::String::string("q13_merge_counts_kernel", NS::UTF8StringEncoding));
-    MTL::ComputePipelineState* pMergeCountPipe = pDevice->newComputePipelineState(pMergeCountFn, &pError);
-    // NOTE: We no longer need the q13_local_histogram_kernel/q13_merge_histogram_kernel pipelines
+    MTL::Function* pFusedCountFn = pLibrary->newFunction(NS::String::string("q13_fused_direct_count_kernel", NS::UTF8StringEncoding));
+    MTL::ComputePipelineState* pFusedCountPipe = pDevice->newComputePipelineState(pFusedCountFn, &pError);
 
     // 3. Create Buffers
     const uint num_threadgroups = 2048;
     MTL::Buffer* pOrdCustKeyBuffer = pDevice->newBuffer(o_custkey.data(), orders_size * sizeof(int), MTL::ResourceStorageModeShared);
     MTL::Buffer* pOrdCommentBuffer = pDevice->newBuffer(o_comment.data(), o_comment.size() * sizeof(char), MTL::ResourceStorageModeShared);
-    
-    const uint inter_count_size = orders_size; // one slot per order for lossless merge
-    MTL::Buffer* pInterCountsBuffer = pDevice->newBuffer(inter_count_size * sizeof(Q13_OrderCount_CPU), MTL::ResourceStorageModeShared);
-    
-    const uint final_count_ht_size = customer_size * 2; // Larger to reduce collisions
-    // CORRECTED INITIALIZATION: Use 0 to match the merge kernel's expectation for an empty key
-    std::vector<uint> cpu_final_counts_ht(final_count_ht_size * (sizeof(Q13_OrderCount_CPU)/sizeof(uint)), 0);
-    MTL::Buffer* pFinalCountsHTBuffer = pDevice->newBuffer(cpu_final_counts_ht.data(), final_count_ht_size * sizeof(Q13_OrderCount_CPU), MTL::ResourceStorageModeShared);
 
-    MTL::Buffer* pCustKeyBuffer = pDevice->newBuffer(c_custkey.data(), customer_size * sizeof(int), MTL::ResourceStorageModeShared);
-    // Removed intermediate histogram buffer; final histogram is built on CPU from counts HT
+    // Direct mapping output: per-customer order counts (index = custkey - 1).
+    std::vector<uint> cpu_counts_per_customer(customer_size, 0u);
+    MTL::Buffer* pCountsPerCustomerBuffer = pDevice->newBuffer(cpu_counts_per_customer.data(), customer_size * sizeof(uint), MTL::ResourceStorageModeShared);
 
-    // 4. Dispatch the first 3 stages of the pipeline
+    // 4. Dispatch the fused GPU stage
     auto q13_e2e_start = std::chrono::high_resolution_clock::now();
     MTL::CommandBuffer* pCommandBuffer = pCommandQueue->commandBuffer();
     
-    // Single encoder for both stages to reduce overhead
+    // Single encoder
     MTL::ComputeCommandEncoder* enc = pCommandBuffer->computeCommandEncoder();
-    enc->setComputePipelineState(pLocalCountPipe);
-    enc->setBuffer(pOrdCustKeyBuffer, 0, 0); enc->setBuffer(pOrdCommentBuffer, 0, 1);
-    enc->setBuffer(pInterCountsBuffer, 0, 2); enc->setBytes(&orders_size, sizeof(orders_size), 3);
+    enc->setComputePipelineState(pFusedCountPipe);
+    enc->setBuffer(pOrdCustKeyBuffer, 0, 0);
+    enc->setBuffer(pOrdCommentBuffer, 0, 1);
+    enc->setBuffer(pCountsPerCustomerBuffer, 0, 2);
+    enc->setBytes(&orders_size, sizeof(orders_size), 3);
+    enc->setBytes(&customer_size, sizeof(customer_size), 4);
     enc->dispatchThreadgroups(MTL::Size(num_threadgroups, 1, 1), MTL::Size(1024, 1, 1));
-
-    enc->setComputePipelineState(pMergeCountPipe);
-    enc->setBuffer(pInterCountsBuffer, 0, 0); enc->setBuffer(pFinalCountsHTBuffer, 0, 1);
-    enc->setBytes(&inter_count_size, sizeof(inter_count_size), 2);
-    enc->setBytes(&final_count_ht_size, sizeof(final_count_ht_size), 3);
-    enc->dispatchThreads(MTL::Size(inter_count_size, 1, 1), MTL::Size(1024, 1, 1));
     enc->endEncoding();
-
-    // NOTE: Removed Stage 2A/2B GPU histogram; CPU merge below is authoritative
 
     // 5. Execute GPU work
     pCommandBuffer->commit();
     pCommandBuffer->waitUntilCompleted();
     double gpuExecutionTime = pCommandBuffer->GPUEndTime() - pCommandBuffer->GPUStartTime();
 
-    // 6. Perform final merge on CPU (authoritative) with O(HT) scan:
-    // Build histogram by scanning the counts HT once, then add zero-count customers.
+    // 6. Perform final merge on CPU (authoritative): build histogram by scanning per-customer counts.
     auto q13_cpu_merge_start = std::chrono::high_resolution_clock::now();
-    struct Q13_OrderCount_CPU_local { uint custkey; uint order_count; };
-    auto* counts_ht = (Q13_OrderCount_CPU_local*)pFinalCountsHTBuffer->contents();
     std::map<uint, uint> final_histogram;
-    uint distinct_customers_with_orders = 0;
-    for (uint i = 0; i < final_count_ht_size; ++i) {
-        uint k = counts_ht[i].custkey;
-        if (k != 0) {
-            final_histogram[counts_ht[i].order_count] += 1;
-            distinct_customers_with_orders += 1;
-        }
-    }
-    if (customer_size > distinct_customers_with_orders) {
-        final_histogram[0] += (customer_size - distinct_customers_with_orders);
+    auto* counts_per_customer = (uint*)pCountsPerCustomerBuffer->contents();
+    for (uint i = 0; i < customer_size; ++i) {
+        final_histogram[counts_per_customer[i]] += 1;
     }
     auto q13_cpu_merge_end = std::chrono::high_resolution_clock::now();
     double q13_cpu_merge_time = std::chrono::duration<double>(q13_cpu_merge_end - q13_cpu_merge_start).count();
@@ -1338,18 +1313,17 @@ void runQ13Benchmark(MTL::Device* pDevice, MTL::CommandQueue* pCommandQueue, MTL
     printf("Total TPC-H Q13 wall-clock: %0.2f ms\n", q13_e2e_time * 1000.0);
 
     // Release objects...
-    pLocalCountFn->release(); pLocalCountPipe->release();
-    pMergeCountFn->release(); pMergeCountPipe->release();
-    // No local histogram pipeline to release
-    pOrdCustKeyBuffer->release(); pOrdCommentBuffer->release();
-    pInterCountsBuffer->release(); pFinalCountsHTBuffer->release();
-    pCustKeyBuffer->release();
+    pFusedCountFn->release();
+    pFusedCountPipe->release();
+    pOrdCustKeyBuffer->release();
+    pOrdCommentBuffer->release();
+    pCountsPerCustomerBuffer->release();
 }
 
 
 void showHelp() {
     std::cout << "GPU Database Mental Benchmark" << std::endl;
-    std::cout << "Usage: GPUDBMentalBenchmark [query]" << std::endl;
+    std::cout << "Usage: GPUDBMentalBenchmark [sf1|sf10] [query]" << std::endl;
     std::cout << "" << std::endl;
     std::cout << "Available queries:" << std::endl;
     std::cout << "  all           - Run all benchmarks (default)" << std::endl;
@@ -1367,26 +1341,33 @@ void showHelp() {
     std::cout << "  GPUDBMentalBenchmark        # Run all benchmarks" << std::endl;
     std::cout << "  GPUDBMentalBenchmark q1     # Run only TPC-H Query 1" << std::endl;
     std::cout << "  GPUDBMentalBenchmark q3     # Run only TPC-H Query 3" << std::endl;
+    std::cout << "  GPUDBMentalBenchmark sf10 q13  # Run Q13 on SF-10" << std::endl;
 }
 
 // --- Main Entry Point ---
 int main(int argc, const char * argv[]) {
     // Parse command line arguments
+    // Supports either:
+    //   GPUDBMentalBenchmark q13
+    //   GPUDBMentalBenchmark sf10 q13
+    //   GPUDBMentalBenchmark q13 sf10
     std::string query = "all"; // default to running all benchmarks
-    if (argc > 1) {
-        query = std::string(argv[1]);
-        if (query == "help" || query == "--help" || query == "-h") {
+    for (int i = 1; i < argc; ++i) {
+        std::string arg(argv[i]);
+        if (arg == "help" || arg == "--help" || arg == "-h") {
             showHelp();
             return 0;
         }
-        // Set dataset path based on argument
-        if (query == "sf1") {
+        if (arg == "sf1") {
             g_dataset_path = "Data/SF-1/";
-            query = "all"; // Run all benchmarks with SF-1
-        } else if (query == "sf10") {
-            g_dataset_path = "Data/SF-10/";
-            query = "all"; // Run all benchmarks with SF-10
+            continue;
         }
+        if (arg == "sf10") {
+            g_dataset_path = "Data/SF-10/";
+            continue;
+        }
+        // Otherwise treat as the query selector.
+        query = arg;
     }
 
     NS::AutoreleasePool* pAutoreleasePool = NS::AutoreleasePool::alloc()->init();
