@@ -67,6 +67,43 @@ GPU-accelerated database operations using Apple Metal vs DuckDB vs CedarDB compa
 | Q9    | 1114                |
 | Q13   | 1687                |
 
+## How to Run Benchmarks
+
+### Prerequisites
+```bash
+# Install DuckDB
+brew install duckdb
+
+# Install CedarDB via Docker
+docker pull cedardb/cedardb
+```
+
+### Quick Start
+```bash
+# 1. Build GPU benchmark
+make
+
+# 2. Generate test data (if not already generated)
+./create_tpch_data.sh
+
+# 3. Run all benchmarks
+./benchmark_gpu.sh SF-1 SF-10
+./benchmark_duckdb.sh SF-1 SF-10
+./benchmark_cedardb.sh SF-1 SF-10  # Requires Docker
+
+# 4. View results
+cat benchmark_results/gpu_results.csv
+cat benchmark_results/duckdb_results.csv
+cat benchmark_results/cedardb_results.csv
+```
+
+### Manual Execution
+```bash
+# Run individual queries manually
+./build/bin/GPUDBMentalBenchmark sf1 q1
+./build/bin/GPUDBMentalBenchmark sf10 q13
+```
+
 ## Benchmark Scripts
 
 The project includes automated benchmark scripts for running comprehensive performance tests:
@@ -113,43 +150,6 @@ Runs queries on CedarDB via Docker and saves to `benchmark_results/cedardb_resul
 ./benchmark_cedardb_with_query_results.sh SF-1 SF-10
 ```
 Extended version with query result logging.
-
-## How to Run Benchmarks
-
-### Prerequisites
-```bash
-# Install DuckDB
-brew install duckdb
-
-# Install CedarDB via Docker
-docker pull cedardb/cedardb
-```
-
-### Quick Start
-```bash
-# 1. Build GPU benchmark
-make
-
-# 2. Generate test data (if not already generated)
-./create_tpch_data.sh
-
-# 3. Run all benchmarks
-./benchmark_gpu.sh SF-1 SF-10
-./benchmark_duckdb.sh SF-1 SF-10
-./benchmark_cedardb.sh SF-1 SF-10  # Requires Docker
-
-# 4. View results
-cat benchmark_results/gpu_results.csv
-cat benchmark_results/duckdb_results.csv
-cat benchmark_results/cedardb_results.csv
-```
-
-### Manual Execution
-```bash
-# Run individual queries manually
-./build/bin/GPUDBMentalBenchmark sf1 q1
-./build/bin/GPUDBMentalBenchmark sf10 q13
-```
 
 ## Benchmark Details
 
