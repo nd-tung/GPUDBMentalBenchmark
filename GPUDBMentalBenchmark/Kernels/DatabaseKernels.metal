@@ -1253,74 +1253,54 @@ struct Q3Aggregates_Local {
 };
 
 
-// KERNEL 1: Build a hash table on the CUSTOMER table.
-// (No changes needed, this kernel is correct)
-kernel void q3_build_customer_ht_kernel(
+// KERNEL 1: Build a BITMAP on the CUSTOMER table.
+// Replaces hash table with a simple bitmap for 'BUILDING' segment.
+kernel void q3_build_customer_bitmap_kernel(
     const device int* c_custkey,
     const device char* c_mktsegment,
-    device HashTableEntry* customer_ht,
+    device atomic_uint* customer_bitmap,
     constant uint& customer_size,
-    constant uint& customer_ht_size,
     uint index [[thread_position_in_grid]])
 {
-    if (index >= customer_size || c_mktsegment[index] != 'B') { // 'B' for BUILDING
-        return;
-    }
+    if (index >= customer_size) return;
 
-    int key = c_custkey[index];
-    int value = 1; // We only need to know the key exists, so value can be a simple flag.
-
-    uint hash_index = (uint)key % customer_ht_size;
-    for (uint i = 0; i < customer_ht_size; ++i) {
-        uint probe_index = (hash_index + i) % customer_ht_size;
-        int expected = -1;
-        if (atomic_compare_exchange_weak_explicit(&customer_ht[probe_index].key, &expected, key, memory_order_relaxed, memory_order_relaxed)) {
-            atomic_store_explicit(&customer_ht[probe_index].value, value, memory_order_relaxed);
-            return;
-        }
+    if (c_mktsegment[index] == 'B') { // 'B' for BUILDING
+        int key = c_custkey[index];
+        // Set bit at 'key'
+        uint word_idx = key / 32;
+        uint bit_idx = key % 32;
+        atomic_fetch_or_explicit(&customer_bitmap[word_idx], (1u << bit_idx), memory_order_relaxed);
     }
 }
 
-
-// KERNEL 2: Build a hash table on the ORDERS table. (CORRECTED)
-// Now stores the original row index as the payload.
-kernel void q3_build_orders_ht_kernel(
+// KERNEL 2: Build a DIRECT MAP on the ORDERS table.
+// Replaces hash table with a direct lookup array: orders_map[orderkey] = row_index
+kernel void q3_build_orders_map_kernel(
     const device int* o_orderkey,
     const device int* o_orderdate,
-    device HashTableEntry* orders_ht,
+    device int* orders_map,
     constant uint& orders_size,
-    constant uint& orders_ht_size,
     constant int& cutoff_date, // 19950315
     uint index [[thread_position_in_grid]])
 {
-    if (index >= orders_size || o_orderdate[index] >= cutoff_date) {
-        return;
-    }
-    
-    int key = o_orderkey[index];
-    int value = (int)index; // Store the original row index as the payload
+    if (index >= orders_size) return;
 
-    uint hash_index = (uint)key % orders_ht_size;
-    for (uint i = 0; i < orders_ht_size; ++i) {
-        uint probe_index = (hash_index + i) % orders_ht_size;
-        int expected = -1;
-        if (atomic_compare_exchange_weak_explicit(&orders_ht[probe_index].key, &expected, key, memory_order_relaxed, memory_order_relaxed)) {
-            atomic_store_explicit(&orders_ht[probe_index].value, value, memory_order_relaxed);
-            return;
-        }
+    if (o_orderdate[index] < cutoff_date) {
+        int key = o_orderkey[index];
+        // Direct map: index by orderkey
+        orders_map[key] = (int)index;
     }
 }
 
-
-// KERNEL 3: Main Probe & Aggregation Kernel (CORRECTED)
-// Now correctly looks up the date and priority using the index payload.
+// KERNEL 3: Main Probe & Aggregation Kernel (OPTIMIZED)
+// Uses Bitmap for Customer, Direct Map for Orders, and ILP=4
 kernel void q3_probe_and_local_agg_kernel(
     const device int* l_orderkey,
     const device int* l_shipdate,
     const device float* l_extendedprice,
     const device float* l_discount,
-    const device HashTableEntry* customer_ht,
-    const device HashTableEntry* orders_ht,
+    const device uint* customer_bitmap, // Changed from HashTableEntry*
+    const device int* orders_map,       // Changed from HashTableEntry*
     // Pass the full original arrays for payload lookup
     const device int* o_custkey,
     const device int* o_orderdate,
@@ -1328,61 +1308,97 @@ kernel void q3_probe_and_local_agg_kernel(
     device Q3Aggregates_Local* out_results,
     device atomic_uint* out_count,
     constant uint& lineitem_size,
-    constant uint& customer_ht_size,
-    constant uint& orders_ht_size,
     constant int& cutoff_date,
     constant uint& out_capacity,
     uint group_id [[threadgroup_position_in_grid]],
     uint thread_id_in_group [[thread_index_in_threadgroup]],
     uint threads_per_group [[threads_per_threadgroup]])
 {
-    uint grid_size = threads_per_group * 2048;
-    for (uint i = (group_id * threads_per_group) + thread_id_in_group; i < lineitem_size; i += grid_size) {
-        
-        if (l_shipdate[i] <= cutoff_date) continue;
+    uint grid_size = threads_per_group * 2048; // Matches host dispatch
+    uint global_id = (group_id * threads_per_group) + thread_id_in_group;
 
-        int orderkey = l_orderkey[i];
+    // ILP Batch Size
+    const int BATCH_SIZE = 4;
+    
+    for (uint i = global_id; i < lineitem_size; i += grid_size * BATCH_SIZE) {
         
-        uint o_hash = (uint)orderkey % orders_ht_size;
-        int orders_idx = -1;
+        // Prefetch indices
+        uint idx[BATCH_SIZE];
+        bool active[BATCH_SIZE];
         
-        for (uint j = 0; j < orders_ht_size; ++j) {
-            uint probe_idx = (o_hash + j) % orders_ht_size;
-            int o_key = atomic_load_explicit(&orders_ht[probe_idx].key, memory_order_relaxed);
-            if (o_key == orderkey) {
-                orders_idx = atomic_load_explicit(&orders_ht[probe_idx].value, memory_order_relaxed);
-                break;
-            }
-            if (o_key == -1) break;
+        for (int k = 0; k < BATCH_SIZE; k++) {
+            idx[k] = i + k * grid_size;
+            active[k] = (idx[k] < lineitem_size);
         }
 
-        if (orders_idx == -1) continue;
-
-        int custkey = o_custkey[orders_idx];
-        uint c_hash = (uint)custkey % customer_ht_size;
-        bool customer_match = false;
-        for (uint j = 0; j < customer_ht_size; ++j) {
-            uint probe_idx = (c_hash + j) % customer_ht_size;
-            int c_key = atomic_load_explicit(&customer_ht[probe_idx].key, memory_order_relaxed);
-             if (c_key == custkey) {
-                customer_match = true;
-                break;
+        // Load Data
+        int l_shipdate_val[BATCH_SIZE];
+        int l_orderkey_val[BATCH_SIZE];
+        
+        for (int k = 0; k < BATCH_SIZE; k++) {
+            if (active[k]) {
+                l_shipdate_val[k] = l_shipdate[idx[k]];
+                l_orderkey_val[k] = l_orderkey[idx[k]];
             }
-            if (c_key == -1) break;
         }
 
-        if (!customer_match) continue;
-        
-        float revenue = l_extendedprice[i] * (1.0f - l_discount[i]);
-        // Append one record per matching lineitem
-        uint idx = atomic_fetch_add_explicit(out_count, 1u, memory_order_relaxed);
-        if (idx < out_capacity) {
-            Q3Aggregates_Local r;
-            r.key = orderkey;
-            r.revenue = revenue;
-            r.orderdate = (uint)o_orderdate[orders_idx];
-            r.shippriority = (uint)o_shippriority[orders_idx];
-            out_results[idx] = r;
+        // Filter 1: l_shipdate > cutoff_date
+        bool pass_date[BATCH_SIZE];
+        for (int k = 0; k < BATCH_SIZE; k++) {
+            pass_date[k] = active[k] && (l_shipdate_val[k] > cutoff_date);
+        }
+
+        // Probe Orders Map
+        int orders_idx[BATCH_SIZE];
+        for (int k = 0; k < BATCH_SIZE; k++) {
+            if (pass_date[k]) {
+                orders_idx[k] = orders_map[l_orderkey_val[k]];
+            } else {
+                orders_idx[k] = -1;
+            }
+        }
+
+        // Filter 2: Order exists in map
+        bool pass_order[BATCH_SIZE];
+        for (int k = 0; k < BATCH_SIZE; k++) {
+            pass_order[k] = pass_date[k] && (orders_idx[k] != -1);
+        }
+
+        // Load Customer Key from Orders Table (Indirect Access)
+        int custkey[BATCH_SIZE];
+        for (int k = 0; k < BATCH_SIZE; k++) {
+            if (pass_order[k]) {
+                custkey[k] = o_custkey[orders_idx[k]];
+            }
+        }
+
+        // Probe Customer Bitmap
+        bool pass_customer[BATCH_SIZE];
+        for (int k = 0; k < BATCH_SIZE; k++) {
+            if (pass_order[k]) {
+                uint word_idx = custkey[k] / 32;
+                uint bit_idx = custkey[k] % 32;
+                pass_customer[k] = (customer_bitmap[word_idx] & (1u << bit_idx)) != 0;
+            } else {
+                pass_customer[k] = false;
+            }
+        }
+
+        // Final Aggregation
+        for (int k = 0; k < BATCH_SIZE; k++) {
+            if (pass_customer[k]) {
+                float revenue = l_extendedprice[idx[k]] * (1.0f - l_discount[idx[k]]);
+                
+                uint out_idx = atomic_fetch_add_explicit(out_count, 1u, memory_order_relaxed);
+                if (out_idx < out_capacity) {
+                    Q3Aggregates_Local r;
+                    r.key = l_orderkey_val[k];
+                    r.revenue = revenue;
+                    r.orderdate = (uint)o_orderdate[orders_idx[k]];
+                    r.shippriority = (uint)o_shippriority[orders_idx[k]];
+                    out_results[out_idx] = r;
+                }
+            }
         }
     }
     // No threadgroup reduction; results are appended globally

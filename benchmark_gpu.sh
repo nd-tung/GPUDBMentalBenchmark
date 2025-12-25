@@ -32,9 +32,7 @@ run_and_capture() {
   # Q3
   q3_gpu=$(grep -E "^Total TPC-H Q3 GPU time:" "$out_file" | awk '{print $(NF-1)}')
   q3_wall=$(grep -E "^Total TPC-H Q3 wall-clock:" "$out_file" | awk '{print $(NF-1)}')
-  # Prefer standardized line if present, else fallback to legacy label
   q3_cpu=$(grep -E "^Q3 CPU time:" "$out_file" | awk '{print $(NF-1)}' || true)
-  if [[ -z "$q3_cpu" ]]; then q3_cpu=$(grep -E "^\s+CPU merge time:" "$out_file" | tail -n 1 | awk '{print $(NF-1)}' || true); fi
   q3_execute=$(awk -v gpu="$q3_gpu" -v cpu="$q3_cpu" 'BEGIN { if (gpu && cpu) print gpu + cpu; else if (gpu) print gpu; else print "" }')
   if [[ -n "$q3_gpu" ]]; then echo "$TIMESTAMP,$sf_label,Q3,$q3_gpu,$q3_wall,$q3_cpu,$q3_execute" >> "$GPU_CSV"; fi
 
@@ -55,9 +53,7 @@ run_and_capture() {
   # Q13
   q13_gpu=$(grep -E "^Total TPC-H Q13 GPU time:" "$out_file" | awk '{print $(NF-1)}')
   q13_wall=$(grep -E "^Total TPC-H Q13 wall-clock:" "$out_file" | awk '{print $(NF-1)}')
-  # Prefer standardized
   q13_cpu=$(grep -E "^Q13 CPU time:" "$out_file" | awk '{print $(NF-1)}' || true)
-  if [[ -z "$q13_cpu" ]]; then q13_cpu=$(grep -E "^Q13 CPU merge time:" "$out_file" | awk '{print $(NF-1)}' || true); fi
   q13_execute=$(awk -v gpu="$q13_gpu" -v cpu="$q13_cpu" 'BEGIN { if (gpu && cpu) print gpu + cpu; else if (gpu) print gpu; else print "" }')
   if [[ -n "$q13_gpu" ]]; then echo "$TIMESTAMP,$sf_label,Q13,$q13_gpu,$q13_wall,$q13_cpu,$q13_execute" >> "$GPU_CSV"; fi
 }

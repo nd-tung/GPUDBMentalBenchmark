@@ -1,0 +1,50 @@
+=== CedarDB Q3 Results ===
+Timestamp: 20251225_191807
+Scale Factor: SF-10
+Query: Q3
+
+Timing is on.
+WARNING:  Please file a bug report: Race detected in coolPage(), oldSwip: nullptr, frame: 0000fff2156fbec0
+WARNING:  Please file a bug report: Race detected in coolPage(), oldSwip: nullptr, frame: 0000fff2156e4c40
+WARNING:  Please file a bug report: Race detected in coolPage(), oldSwip: nullptr, frame: 0000fff2157e3280
+WARNING:  Please file a bug report: Race detected in coolPage(), oldSwip: nullptr, frame: 0000fff2156fb020
+WARNING:  Please file a bug report: Race detected in coolPage(), oldSwip: nullptr, frame: 0000fff215702340
+WARNING:  Please file a bug report: Race detected in coolPage(), oldSwip: nullptr, frame: 0000fff2157f6660
+WARNING:  Please file a bug report: Race detected in coolPage(), oldSwip: nullptr, frame: 0000fff2156e4820
+WARNING:  Please file a bug report: Race detected in coolPage(), oldSwip: nullptr, frame: 0000fff21579cf60
+WARNING:  Please file a bug report: Race detected in coolPage(), oldSwip: nullptr, frame: 0000fff2157df1a0
+WARNING:  Please file a bug report: Race detected in coolPage(), oldSwip: nullptr, frame: 0000fff215700d20
+WARNING:  Please file a bug report: Race detected in coolPage(), oldSwip: nullptr, frame: 0000fff21579d680
+WARNING:  Please file a bug report: Race detected in coolPage(), oldSwip: 0000000000000001, frame: 0000fff215323fe0
+WARNING:  Please file a bug report: Race detected in coolPage(), oldSwip: nullptr, frame: 0000fff2157962a0
+WARNING:  Please file a bug report: Race detected in coolPage(), oldSwip: nullptr, frame: 0000fff2157e3340
+WARNING:  Please file a bug report: Race detected in coolPage(), oldSwip: nullptr, frame: 0000fff2156f9760
+WARNING:  Please file a bug report: Race detected in coolPage(), oldSwip: nullptr, frame: 0000fff2156e4820
+WARNING:  Please file a bug report: Race detected in coolPage(), oldSwip: nullptr, frame: 0000fff2157ec2e0
+WARNING:  Please file a bug report: Race detected in coolPage(), oldSwip: nullptr, frame: 0000fff2157ed240
+WARNING:  Please file a bug report: Race detected in coolPage(), oldSwip: nullptr, frame: 0000fff215787e40
+WARNING:  Please file a bug report: Race detected in coolPage(), oldSwip: nullptr, frame: 0000fff2157e33a0
+WARNING:  Please file a bug report: Race detected in coolPage(), oldSwip: nullptr, frame: 0000fff21579a500
+WARNING:  Please file a bug report: Race detected in coolPage(), oldSwip: nullptr, frame: 0000fff2157f4560
+WARNING:  Please file a bug report: Race detected in coolPage(), oldSwip: nullptr, frame: 0000fff2156fae40
+WARNING:  Please file a bug report: Race detected in coolPage(), oldSwip: nullptr, frame: 0000fff2156e4d00
+WARNING:  Please file a bug report: Race detected in coolPage(), oldSwip: nullptr, frame: 0000fff2157a8180
+WARNING:  Please file a bug report: Race detected in coolPage(), oldSwip: nullptr, frame: 0000fff2156ed700
+WARNING:  Please file a bug report: Race detected in coolPage(), oldSwip: nullptr, frame: 0000fff2157ded80
+WARNING:  Please file a bug report: Race detected in coolPage(), oldSwip: nullptr, frame: 0000fff2157a3380
+WARNING:  Please file a bug report: Race detected in coolPage(), oldSwip: nullptr, frame: 0000fff2157e8080
+ l_orderkey |   revenue   | o_orderdate | o_shippriority 
+------------+-------------+-------------+----------------
+    4791171 | 440715.2185 | 1995-02-23  |              0
+   46678469 | 439855.3250 | 1995-01-27  |              0
+   23906758 | 432728.5737 | 1995-03-14  |              0
+   23861382 | 428739.1368 | 1995-03-09  |              0
+   59393639 | 426036.0662 | 1995-02-12  |              0
+    3355202 | 425100.6657 | 1995-03-04  |              0
+    9806272 | 425088.0568 | 1995-03-13  |              0
+   22810436 | 423231.9690 | 1995-01-02  |              0
+   16384100 | 421478.7294 | 1995-03-02  |              0
+   52974151 | 415367.1195 | 1995-02-05  |              0
+(10 rows)
+
+Time: 2248.488 ms (00:02.248)

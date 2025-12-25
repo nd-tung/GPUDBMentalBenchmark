@@ -65,14 +65,13 @@ run_and_capture_with_results() {
     echo "Scale Factor: ${sf_label}" >> "$q1_log"
     echo "Query: Q1" >> "$q1_log"
     echo "" >> "$q1_log"
-    sed -n '/^--- Running TPC-H Query 1 Benchmark ---$/,/^Total TPC-H Q1 end-to-end:/p' "$out_file" >> "$q1_log"
+    sed -n '/^--- Running TPC-H Query 1 Benchmark ---$/,/^Total TPC-H Q1 wall-clock:/p' "$out_file" >> "$q1_log"
   fi
   
   # Parse Q3
   local q3_gpu=$(grep -E "^Total TPC-H Q3 GPU time:" "$out_file" | awk '{print $(NF-1)}')
   local q3_wall=$(grep -E "^Total TPC-H Q3 wall-clock:" "$out_file" | awk '{print $(NF-1)}')
-  local q3_cpu=$(grep -E "^Q3 CPU time:" "$out_file" | awk '{print $(NF-1)}')
-  if [[ -z "$q3_cpu" ]]; then q3_cpu=$(grep -E "^\s+CPU merge time:" "$out_file" | tail -n 1 | awk '{print $(NF-1)}' || echo "0.0"); fi
+  local q3_cpu=$(grep -E "^Q3 CPU time:" "$out_file" | awk '{print $(NF-1)}' || echo "0.0")
   local q3_execute=$(awk -v gpu="$q3_gpu" -v cpu="$q3_cpu" 'BEGIN { if (gpu && cpu) print gpu + cpu; else if (gpu) print gpu; else print "" }')
   
   if [[ -n "$q3_gpu" ]]; then
@@ -132,8 +131,7 @@ run_and_capture_with_results() {
   # Parse Q13
   local q13_gpu=$(grep -E "^Total TPC-H Q13 GPU time:" "$out_file" | awk '{print $(NF-1)}')
   local q13_wall=$(grep -E "^Total TPC-H Q13 wall-clock:" "$out_file" | awk '{print $(NF-1)}')
-  local q13_cpu=$(grep -E "^Q13 CPU time:" "$out_file" | awk '{print $(NF-1)}')
-  if [[ -z "$q13_cpu" ]]; then q13_cpu=$(grep -E "^Q13 CPU merge time:" "$out_file" | awk '{print $(NF-1)}' || echo "0.0"); fi
+  local q13_cpu=$(grep -E "^Q13 CPU time:" "$out_file" | awk '{print $(NF-1)}' || echo "0.0")
   local q13_execute=$(awk -v gpu="$q13_gpu" -v cpu="$q13_cpu" 'BEGIN { if (gpu && cpu) print gpu + cpu; else if (gpu) print gpu; else print "" }')
   
   if [[ -n "$q13_gpu" ]]; then

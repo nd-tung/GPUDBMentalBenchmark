@@ -1,0 +1,47 @@
+=== CedarDB Q1 Results ===
+Timestamp: 20251225_191807
+Scale Factor: SF-10
+Query: Q1
+
+Timing is on.
+WARNING:  Please file a bug report: Race detected in coolPage(), oldSwip: nullptr, frame: 0000fff215701aa0
+WARNING:  Please file a bug report: Race detected in coolPage(), oldSwip: nullptr, frame: 0000fff2156fa480
+WARNING:  Please file a bug report: Race detected in coolPage(), oldSwip: nullptr, frame: 0000fff215788260
+WARNING:  Please file a bug report: Race detected in coolPage(), oldSwip: 0000000000000001, frame: 0000fff215323fe0
+WARNING:  Please file a bug report: Race detected in coolPage(), oldSwip: nullptr, frame: 0000fff2156f8200
+WARNING:  Please file a bug report: Race detected in coolPage(), oldSwip: nullptr, frame: 0000fff2156fbec0
+WARNING:  Please file a bug report: Race detected in coolPage(), oldSwip: nullptr, frame: 0000fff2157881a0
+WARNING:  Please file a bug report: Race detected in coolPage(), oldSwip: nullptr, frame: 0000fff2157da580
+WARNING:  Please file a bug report: Race detected in coolPage(), oldSwip: nullptr, frame: 0000fff215700360
+WARNING:  Please file a bug report: Race detected in coolPage(), oldSwip: nullptr, frame: 0000fff2156f13c0
+WARNING:  Please file a bug report: Race detected in coolPage(), oldSwip: nullptr, frame: 0000fff2157dede0
+WARNING:  Please file a bug report: Race detected in coolPage(), oldSwip: nullptr, frame: 0000fff2157f4560
+WARNING:  Please file a bug report: Race detected in coolPage(), oldSwip: nullptr, frame: 0000fff2156e4880
+WARNING:  Please file a bug report: Race detected in coolPage(), oldSwip: nullptr, frame: 0000fff21579ea00
+WARNING:  Please file a bug report: Race detected in coolPage(), oldSwip: nullptr, frame: 0000fff2157e8080
+WARNING:  Please file a bug report: Race detected in coolPage(), oldSwip: nullptr, frame: 0000fff2157f7620
+WARNING:  Please file a bug report: Race detected in coolPage(), oldSwip: nullptr, frame: 0000fff2157a0860
+WARNING:  Please file a bug report: Race detected in coolPage(), oldSwip: nullptr, frame: 0000fff215700360
+WARNING:  Please file a bug report: Race detected in coolPage(), oldSwip: nullptr, frame: 0000fff2156fae40
+WARNING:  Please file a bug report: Race detected in coolPage(), oldSwip: nullptr, frame: 0000fff2157eeb00
+WARNING:  Please file a bug report: Race detected in coolPage(), oldSwip: nullptr, frame: 0000fff2156eb2a0
+WARNING:  Please file a bug report: Race detected in coolPage(), oldSwip: nullptr, frame: 0000fff2156fe680
+WARNING:  Please file a bug report: Race detected in coolPage(), oldSwip: nullptr, frame: 0000fff2157f35a0
+WARNING:  Please file a bug report: Race detected in coolPage(), oldSwip: nullptr, frame: 0000fff2156f5560
+WARNING:  Please file a bug report: Race detected in coolPage(), oldSwip: nullptr, frame: 0000fff2156f6be0
+WARNING:  Please file a bug report: Race detected in coolPage(), oldSwip: nullptr, frame: 0000fff2157e3280
+WARNING:  Please file a bug report: Race detected in coolPage(), oldSwip: nullptr, frame: 0000fff2156fc460
+WARNING:  Please file a bug report: Race detected in coolPage(), oldSwip: nullptr, frame: 0000fff2157a1d00
+WARNING:  Please file a bug report: Race detected in coolPage(), oldSwip: nullptr, frame: 0000fff2156f18a0
+WARNING:  Please file a bug report: Race detected in coolPage(), oldSwip: nullptr, frame: 0000fff2157a3380
+WARNING:  Please file a bug report: Race detected in coolPage(), oldSwip: nullptr, frame: 0000fff2156e4d60
+WARNING:  Please file a bug report: Race detected in coolPage(), oldSwip: nullptr, frame: 0000fff2156fe680
+ l_returnflag | l_linestatus |   sum_qty    |  sum_base_price  |   sum_disc_price   |      sum_charge      |         avg_qty          |          avg_price          |        avg_disc         | count_order 
+--------------+--------------+--------------+------------------+--------------------+----------------------+--------------------------+-----------------------------+-------------------------+-------------
+ A            | F            | 377518399.00 |  566065727797.25 |  537759104278.0656 |  559276670892.116819 | 25.500975103007097301641 | 38237.151008958545676302548 | 0.050006574540243204625 |    14804077
+ N            | F            |   9851614.00 |   14767438399.17 |   14028805792.2114 |   14590490998.366737 | 25.522448302840947362421 | 38257.810660081140316789206 | 0.049973367737656671796 |      385998
+ N            | O            | 743124873.00 | 1114302286901.88 | 1058580922144.9638 | 1100937000170.591854 | 25.498075870689314714882 | 38233.902923481809562340228 | 0.050000811821131306029 |    29144351
+ R            | F            | 377732830.00 |  566431054976.00 |  538110922664.7677 |  559634780885.086257 | 25.508384789680138339727 | 38251.219273559760843041985 | 0.049996792314087420448 |    14808183
+(4 rows)
+
+Time: 492.679 ms

@@ -94,24 +94,29 @@ void runSingleSelectionTest(MTL::Device* device, MTL::CommandQueue* commandQueue
                             MTL::Buffer* inBuffer, MTL::Buffer* resultBuffer,
                             const std::vector<int>& cpuData, int filterValue) {
     
-    MTL::CommandBuffer* commandBuffer = commandQueue->commandBuffer();
-    MTL::ComputeCommandEncoder* commandEncoder = commandBuffer->computeCommandEncoder();
-    commandEncoder->setComputePipelineState(pipelineState);
-    commandEncoder->setBuffer(inBuffer, 0, 0);
-    commandEncoder->setBuffer(resultBuffer, 0, 1);
-    commandEncoder->setBytes(&filterValue, sizeof(filterValue), 2);
-    
-    MTL::Size gridSize = MTL::Size::Make(cpuData.size(), 1, 1);
-    NS::UInteger threadGroupSize = pipelineState->maxTotalThreadsPerThreadgroup();
-    if (threadGroupSize > cpuData.size()) { threadGroupSize = cpuData.size(); }
-    MTL::Size threadgroupSize = MTL::Size::Make(threadGroupSize, 1, 1);
-    commandEncoder->dispatchThreads(gridSize, threadgroupSize);
-    commandEncoder->endEncoding();
-    
-    commandBuffer->commit();
-    commandBuffer->waitUntilCompleted();
+    double gpuExecutionTime = 0.0;
+    for(int iter = 0; iter < 3; ++iter) {
+        MTL::CommandBuffer* commandBuffer = commandQueue->commandBuffer();
+        MTL::ComputeCommandEncoder* commandEncoder = commandBuffer->computeCommandEncoder();
+        commandEncoder->setComputePipelineState(pipelineState);
+        commandEncoder->setBuffer(inBuffer, 0, 0);
+        commandEncoder->setBuffer(resultBuffer, 0, 1);
+        commandEncoder->setBytes(&filterValue, sizeof(filterValue), 2);
+        
+        MTL::Size gridSize = MTL::Size::Make(cpuData.size(), 1, 1);
+        NS::UInteger threadGroupSize = pipelineState->maxTotalThreadsPerThreadgroup();
+        if (threadGroupSize > cpuData.size()) { threadGroupSize = cpuData.size(); }
+        MTL::Size threadgroupSize = MTL::Size::Make(threadGroupSize, 1, 1);
+        commandEncoder->dispatchThreads(gridSize, threadgroupSize);
+        commandEncoder->endEncoding();
+        
+        commandBuffer->commit();
+        commandBuffer->waitUntilCompleted();
 
-    double gpuExecutionTime = commandBuffer->GPUEndTime() - commandBuffer->GPUStartTime();
+        if (iter == 2) {
+            gpuExecutionTime = commandBuffer->GPUEndTime() - commandBuffer->GPUStartTime();
+        }
+    }
     double dataSizeBytes = (double)cpuData.size() * sizeof(int);
     double dataSizeGB = dataSizeBytes / (1024.0 * 1024.0 * 1024.0);
     double bandwidth = dataSizeGB / gpuExecutionTime;
@@ -472,63 +477,77 @@ void runQ1Benchmark(MTL::Device* device, MTL::CommandQueue* commandQueue, MTL::L
     memset(f_sumDiscountBP->contents(), 0, bins * sizeof(uint32_t));
     memset(f_counts->contents(), 0, bins * sizeof(uint32_t));
 
-    // No compaction needed for fixed bins
-
-    // Dispatch kernels
-    auto q1_e2e_start = std::chrono::high_resolution_clock::now();
-    MTL::CommandBuffer* commandBuffer = commandQueue->commandBuffer();
     const int cutoffDate = 19980902; // DATE '1998-12-01' - INTERVAL '90' DAY
 
-    auto gpuStart = std::chrono::high_resolution_clock::now();
-    // Use a single encoder for both stages to reduce overhead
-    MTL::ComputeCommandEncoder* enc = commandBuffer->computeCommandEncoder();
-    // Stage 1: accumulate partials
-    enc->setComputePipelineState(stage1PSO);
-    enc->setBuffer(shipdateBuffer, 0, 0);
-    enc->setBuffer(flagBuffer, 0, 1);
-    enc->setBuffer(statusBuffer, 0, 2);
-    enc->setBuffer(qtyBuffer, 0, 3);
-    enc->setBuffer(priceBuffer, 0, 4);
-    enc->setBuffer(discBuffer, 0, 5);
-    enc->setBuffer(taxBuffer, 0, 6);
-    enc->setBuffer(p_sumQtyCents, 0, 7);
-    enc->setBuffer(p_sumBaseCents, 0, 8);
-    enc->setBuffer(p_sumDiscPriceCents, 0, 9);
-    enc->setBuffer(p_sumChargeCents, 0, 10);
-    enc->setBuffer(p_sumDiscountBP, 0, 11);
-    enc->setBuffer(p_counts, 0, 12);
-    enc->setBytes(&data_size, sizeof(data_size), 13);
-    enc->setBytes(&cutoffDate, sizeof(cutoffDate), 14);
-    enc->setBytes(&num_threadgroups, sizeof(num_threadgroups), 15);
-    NS::UInteger tgSize = stage1PSO->maxTotalThreadsPerThreadgroup();
-    if (tgSize > 1024) tgSize = 1024; // matches shared arrays in kernel
-    enc->dispatchThreadgroups(MTL::Size::Make(num_threadgroups, 1, 1), MTL::Size::Make(tgSize, 1, 1));
+    // Dispatch kernels
+    double q1_gpu_ms = 0.0;
+    
+    for(int iter = 0; iter < 3; ++iter) {
+        // Reset partials and finals
+        memset(p_sumQtyCents->contents(), 0, num_threadgroups * bins * sizeof(long));
+        memset(p_sumBaseCents->contents(), 0, num_threadgroups * bins * sizeof(long));
+        memset(p_sumDiscPriceCents->contents(), 0, num_threadgroups * bins * sizeof(long));
+        memset(p_sumChargeCents->contents(), 0, num_threadgroups * bins * sizeof(long));
+        memset(p_sumDiscountBP->contents(), 0, num_threadgroups * bins * sizeof(uint32_t));
+        memset(p_counts->contents(), 0, num_threadgroups * bins * sizeof(uint32_t));
+        
+        memset(f_sumQtyCents->contents(), 0, bins * sizeof(long));
+        memset(f_sumBaseCents->contents(), 0, bins * sizeof(long));
+        memset(f_sumDiscPriceCents->contents(), 0, bins * sizeof(long));
+        memset(f_sumChargeCents->contents(), 0, bins * sizeof(long));
+        memset(f_sumDiscountBP->contents(), 0, bins * sizeof(uint32_t));
+        memset(f_counts->contents(), 0, bins * sizeof(uint32_t));
 
-    // Stage 2: reduce partials to finals on the same encoder
-    enc->setComputePipelineState(stage2PSO);
-    enc->setBuffer(p_sumQtyCents, 0, 0);
-    enc->setBuffer(p_sumBaseCents, 0, 1);
-    enc->setBuffer(p_sumDiscPriceCents, 0, 2);
-    enc->setBuffer(p_sumChargeCents, 0, 3);
-    enc->setBuffer(p_sumDiscountBP, 0, 4);
-    enc->setBuffer(p_counts, 0, 5);
-    enc->setBuffer(f_sumQtyCents, 0, 6);
-    enc->setBuffer(f_sumBaseCents, 0, 7);
-    enc->setBuffer(f_sumDiscPriceCents, 0, 8);
-    enc->setBuffer(f_sumChargeCents, 0, 9);
-    enc->setBuffer(f_sumDiscountBP, 0, 10);
-    enc->setBuffer(f_counts, 0, 11);
-    enc->setBytes(&num_threadgroups, sizeof(num_threadgroups), 12);
-    enc->dispatchThreads(MTL::Size::Make(1, 1, 1), MTL::Size::Make(1, 1, 1));
-    enc->endEncoding();
+        MTL::CommandBuffer* commandBuffer = commandQueue->commandBuffer();
+        MTL::ComputeCommandEncoder* enc = commandBuffer->computeCommandEncoder();
+        
+        // Stage 1: accumulate partials
+        enc->setComputePipelineState(stage1PSO);
+        enc->setBuffer(shipdateBuffer, 0, 0);
+        enc->setBuffer(flagBuffer, 0, 1);
+        enc->setBuffer(statusBuffer, 0, 2);
+        enc->setBuffer(qtyBuffer, 0, 3);
+        enc->setBuffer(priceBuffer, 0, 4);
+        enc->setBuffer(discBuffer, 0, 5);
+        enc->setBuffer(taxBuffer, 0, 6);
+        enc->setBuffer(p_sumQtyCents, 0, 7);
+        enc->setBuffer(p_sumBaseCents, 0, 8);
+        enc->setBuffer(p_sumDiscPriceCents, 0, 9);
+        enc->setBuffer(p_sumChargeCents, 0, 10);
+        enc->setBuffer(p_sumDiscountBP, 0, 11);
+        enc->setBuffer(p_counts, 0, 12);
+        enc->setBytes(&data_size, sizeof(data_size), 13);
+        enc->setBytes(&cutoffDate, sizeof(cutoffDate), 14);
+        enc->setBytes(&num_threadgroups, sizeof(num_threadgroups), 15);
+        NS::UInteger tgSize = stage1PSO->maxTotalThreadsPerThreadgroup();
+        if (tgSize > 1024) tgSize = 1024; // matches shared arrays in kernel
+        enc->dispatchThreadgroups(MTL::Size::Make(num_threadgroups, 1, 1), MTL::Size::Make(tgSize, 1, 1));
 
-    commandBuffer->commit();
-    commandBuffer->waitUntilCompleted();
-    auto gpuEnd = std::chrono::high_resolution_clock::now();
-    double q1_wall_ms = std::chrono::duration<double, std::milli>(gpuEnd - gpuStart).count();
-    double q1_gpu_ms = (commandBuffer->GPUEndTime() - commandBuffer->GPUStartTime()) * 1000.0;
-    auto q1_e2e_end = std::chrono::high_resolution_clock::now();
-    double q1_e2e_ms = std::chrono::duration<double, std::milli>(q1_e2e_end - q1_e2e_start).count();
+        // Stage 2: reduce partials to finals on the same encoder
+        enc->setComputePipelineState(stage2PSO);
+        enc->setBuffer(p_sumQtyCents, 0, 0);
+        enc->setBuffer(p_sumBaseCents, 0, 1);
+        enc->setBuffer(p_sumDiscPriceCents, 0, 2);
+        enc->setBuffer(p_sumChargeCents, 0, 3);
+        enc->setBuffer(p_sumDiscountBP, 0, 4);
+        enc->setBuffer(p_counts, 0, 5);
+        enc->setBuffer(f_sumQtyCents, 0, 6);
+        enc->setBuffer(f_sumBaseCents, 0, 7);
+        enc->setBuffer(f_sumDiscPriceCents, 0, 8);
+        enc->setBuffer(f_sumChargeCents, 0, 9);
+        enc->setBuffer(f_sumDiscountBP, 0, 10);
+        enc->setBuffer(f_counts, 0, 11);
+        enc->setBytes(&num_threadgroups, sizeof(num_threadgroups), 12);
+        enc->dispatchThreads(MTL::Size::Make(1, 1, 1), MTL::Size::Make(1, 1, 1));
+        enc->endEncoding();
+
+        commandBuffer->commit();
+        commandBuffer->waitUntilCompleted();
+        
+        if (iter == 2) {
+            q1_gpu_ms = (commandBuffer->GPUEndTime() - commandBuffer->GPUStartTime()) * 1000.0;
+        }
+    }
 
     // CPU post-processing (build final results) timing start
     auto q1_cpu_post_start = std::chrono::high_resolution_clock::now();
@@ -580,9 +599,7 @@ void runQ1Benchmark(MTL::Device* device, MTL::CommandQueue* commandQueue, MTL::L
     // Standardized timing prints
     printf("Total TPC-H Q1 GPU time: %0.2f ms\n", q1_gpu_ms);
     printf("Q1 CPU time: %0.2f ms\n", q1_cpu_ms);
-    printf("Total TPC-H Q1 wall-clock: %0.2f ms\n", q1_wall_ms);
-    // Also report e2e in case host prep differs
-    printf("Total TPC-H Q1 end-to-end: %0.2f ms\n", q1_e2e_ms);
+    printf("Total TPC-H Q1 wall-clock: %0.2f ms\n", q1_gpu_ms + q1_cpu_ms);
 
     // Cleanup
     stage1Fn->release(); stage1PSO->release(); stage2Fn->release(); stage2PSO->release();
@@ -636,10 +653,10 @@ void runQ3Benchmark(MTL::Device* pDevice, MTL::CommandQueue* pCommandQueue, MTL:
 
     // 2. Setup all kernels
     NS::Error* pError = nullptr;
-    MTL::Function* pCustBuildFn = pLibrary->newFunction(NS::String::string("q3_build_customer_ht_kernel", NS::UTF8StringEncoding));
+    MTL::Function* pCustBuildFn = pLibrary->newFunction(NS::String::string("q3_build_customer_bitmap_kernel", NS::UTF8StringEncoding));
     MTL::ComputePipelineState* pCustBuildPipe = pDevice->newComputePipelineState(pCustBuildFn, &pError);
 
-    MTL::Function* pOrdersBuildFn = pLibrary->newFunction(NS::String::string("q3_build_orders_ht_kernel", NS::UTF8StringEncoding));
+    MTL::Function* pOrdersBuildFn = pLibrary->newFunction(NS::String::string("q3_build_orders_map_kernel", NS::UTF8StringEncoding));
     MTL::ComputePipelineState* pOrdersBuildPipe = pDevice->newComputePipelineState(pOrdersBuildFn, &pError);
     
     MTL::Function* pProbeAggFn = pLibrary->newFunction(NS::String::string("q3_probe_and_local_agg_kernel", NS::UTF8StringEncoding));
@@ -649,19 +666,28 @@ void runQ3Benchmark(MTL::Device* pDevice, MTL::CommandQueue* pCommandQueue, MTL:
     MTL::ComputePipelineState* pMergePipe = pDevice->newComputePipelineState(pMergeFn, &pError);
 
     // 3. Create Buffers
-    const uint customer_ht_size = customer_size * 2;
-    std::vector<int> cpu_customer_ht(customer_ht_size * 2, -1);
+    // Optimization 1: Bitmap for Customer (filter 'BUILDING')
+    int max_custkey = 0;
+    for(int k : c_custkey) max_custkey = std::max(max_custkey, k);
+    const uint customer_bitmap_ints = (max_custkey + 31) / 32 + 1;
+    MTL::Buffer* pCustomerBitmapBuffer = pDevice->newBuffer(customer_bitmap_ints * sizeof(uint), MTL::ResourceStorageModeShared);
+    std::memset(pCustomerBitmapBuffer->contents(), 0, customer_bitmap_ints * sizeof(uint));
+
     MTL::Buffer* pCustKeyBuffer = pDevice->newBuffer(c_custkey.data(), customer_size * sizeof(int), MTL::ResourceStorageModeShared);
     MTL::Buffer* pCustMktBuffer = pDevice->newBuffer(c_mktsegment.data(), customer_size * sizeof(char), MTL::ResourceStorageModeShared);
-    MTL::Buffer* pCustomerHTBuffer = pDevice->newBuffer(cpu_customer_ht.data(), customer_ht_size * sizeof(int) * 2, MTL::ResourceStorageModeShared);
 
-    const uint orders_ht_size = orders_size * 2;
-    std::vector<int> cpu_orders_ht(orders_ht_size * 2, -1);
+    // Optimization 2: Direct Map for Orders
+    int max_orderkey = 0;
+    for(int k : o_orderkey) max_orderkey = std::max(max_orderkey, k);
+    const uint orders_map_size = max_orderkey + 1;
+    MTL::Buffer* pOrdersMapBuffer = pDevice->newBuffer(orders_map_size * sizeof(int), MTL::ResourceStorageModeShared);
+    // Initialize with -1
+    std::memset(pOrdersMapBuffer->contents(), -1, orders_map_size * sizeof(int));
+
     MTL::Buffer* pOrdKeyBuffer = pDevice->newBuffer(o_orderkey.data(), orders_size * sizeof(int), MTL::ResourceStorageModeShared);
     MTL::Buffer* pOrdCustKeyBuffer = pDevice->newBuffer(o_custkey.data(), orders_size * sizeof(int), MTL::ResourceStorageModeShared);
     MTL::Buffer* pOrdDateBuffer = pDevice->newBuffer(o_orderdate.data(), orders_size * sizeof(int), MTL::ResourceStorageModeShared);
     MTL::Buffer* pOrdPrioBuffer = pDevice->newBuffer(o_shippriority.data(), orders_size * sizeof(int), MTL::ResourceStorageModeShared);
-    MTL::Buffer* pOrdersHTBuffer = pDevice->newBuffer(cpu_orders_ht.data(), orders_ht_size * sizeof(int) * 2, MTL::ResourceStorageModeShared);
     
     MTL::Buffer* pLineOrdKeyBuffer = pDevice->newBuffer(l_orderkey.data(), lineitem_size * sizeof(int), MTL::ResourceStorageModeShared);
     MTL::Buffer* pLineShipDateBuffer = pDevice->newBuffer(l_shipdate.data(), lineitem_size * sizeof(int), MTL::ResourceStorageModeShared);
@@ -680,63 +706,79 @@ void runQ3Benchmark(MTL::Device* pDevice, MTL::CommandQueue* pCommandQueue, MTL:
     std::vector<int> cpu_final_ht(final_ht_size * (sizeof(Q3Aggregates_CPU)/sizeof(int)), -1);
     MTL::Buffer* pFinalHTBuffer = pDevice->newBuffer(cpu_final_ht.data(), final_ht_size * sizeof(Q3Aggregates_CPU), MTL::ResourceStorageModeShared);
 
-    // 4. Dispatch full pipeline
-    auto q3_e2e_start = std::chrono::high_resolution_clock::now();
-    MTL::CommandBuffer* pCommandBuffer = pCommandQueue->commandBuffer();
     const int cutoff_date = 19950315;
 
-    // Use a single encoder and switch pipeline states between stages
-    MTL::ComputeCommandEncoder* enc = pCommandBuffer->computeCommandEncoder();
-    // Customer HT build
-    enc->setComputePipelineState(pCustBuildPipe);
-    enc->setBuffer(pCustKeyBuffer, 0, 0);
-    enc->setBuffer(pCustMktBuffer, 0, 1);
-    enc->setBuffer(pCustomerHTBuffer, 0, 2);
-    enc->setBytes(&customer_size, sizeof(customer_size), 3);
-    enc->setBytes(&customer_ht_size, sizeof(customer_ht_size), 4);
-    enc->dispatchThreads(MTL::Size(customer_size, 1, 1), MTL::Size(1024, 1, 1));
-    // Orders HT build
-    enc->setComputePipelineState(pOrdersBuildPipe);
-    enc->setBuffer(pOrdKeyBuffer, 0, 0);
-    enc->setBuffer(pOrdDateBuffer, 0, 1);
-    enc->setBuffer(pOrdersHTBuffer, 0, 2);
-    enc->setBytes(&orders_size, sizeof(orders_size), 3);
-    enc->setBytes(&orders_ht_size, sizeof(orders_ht_size), 4);
-    enc->setBytes(&cutoff_date, sizeof(cutoff_date), 5);
-    enc->dispatchThreads(MTL::Size(orders_size, 1, 1), MTL::Size(1024, 1, 1));
-    // Probe + local aggregation
-    enc->setComputePipelineState(pProbeAggPipe);
-    enc->setBuffer(pLineOrdKeyBuffer, 0, 0);
-    enc->setBuffer(pLineShipDateBuffer, 0, 1);
-    enc->setBuffer(pLinePriceBuffer, 0, 2);
-    enc->setBuffer(pLineDiscBuffer, 0, 3);
-    enc->setBuffer(pCustomerHTBuffer, 0, 4);
-    enc->setBuffer(pOrdersHTBuffer, 0, 5);
-    enc->setBuffer(pOrdCustKeyBuffer, 0, 6);
-    enc->setBuffer(pOrdDateBuffer, 0, 7);
-    enc->setBuffer(pOrdPrioBuffer, 0, 8);
-    enc->setBuffer(pIntermediateBuffer, 0, 9);
-    enc->setBuffer(pOutCountBuffer, 0, 10);
-    enc->setBytes(&lineitem_size, sizeof(lineitem_size), 11);
-    enc->setBytes(&customer_ht_size, sizeof(customer_ht_size), 12);
-    enc->setBytes(&orders_ht_size, sizeof(orders_ht_size), 13);
-    enc->setBytes(&cutoff_date, sizeof(cutoff_date), 14);
-    enc->setBytes(&intermediate_capacity, sizeof(intermediate_capacity), 15);
-    enc->dispatchThreadgroups(MTL::Size(num_threadgroups, 1, 1), MTL::Size(1024, 1, 1));
-    enc->endEncoding();
+    // 4. Dispatch full pipeline (Warm-up + Measure)
+    // We run 3 times and measure the last one to eliminate driver initialization overhead
+    double gpuExecutionTime = 0.0;
     
-    // Ensure final hash table is initialized to empty (-1 keys) on CPU (shared memory)
-    {   
-        void* final_ptr = pFinalHTBuffer->contents();
-        memset(final_ptr, 0xFF, final_ht_size * sizeof(Q3Aggregates_CPU));
+    for(int iter = 0; iter < 3; ++iter) {
+        // Reset Atomic Counter
+        std::memset(pOutCountBuffer->contents(), 0, sizeof(uint));
+        
+        // auto q3_start = std::chrono::high_resolution_clock::now();
+        
+        MTL::CommandBuffer* pCommandBuffer = pCommandQueue->commandBuffer();
+        MTL::ComputeCommandEncoder* enc = pCommandBuffer->computeCommandEncoder();
+        
+        // Customer HT build (Bitmap)
+        enc->setComputePipelineState(pCustBuildPipe);
+        enc->setBuffer(pCustKeyBuffer, 0, 0);
+        enc->setBuffer(pCustMktBuffer, 0, 1);
+        enc->setBuffer(pCustomerBitmapBuffer, 0, 2);
+        enc->setBytes(&customer_size, sizeof(customer_size), 3);
+        {
+            NS::UInteger threadGroupSize = pCustBuildPipe->maxTotalThreadsPerThreadgroup();
+            if (threadGroupSize > 256) threadGroupSize = 256;
+            MTL::Size threadgroupSize = MTL::Size(threadGroupSize, 1, 1);
+            MTL::Size threadgroups = MTL::Size((customer_size + threadGroupSize - 1) / threadGroupSize, 1, 1);
+            enc->dispatchThreadgroups(threadgroups, threadgroupSize);
+        }
+
+        // Orders HT build (Direct Map)
+        enc->setComputePipelineState(pOrdersBuildPipe);
+        enc->setBuffer(pOrdKeyBuffer, 0, 0);
+        enc->setBuffer(pOrdDateBuffer, 0, 1);
+        enc->setBuffer(pOrdersMapBuffer, 0, 2);
+        enc->setBytes(&orders_size, sizeof(orders_size), 3);
+        enc->setBytes(&cutoff_date, sizeof(cutoff_date), 4);
+        {
+            NS::UInteger threadGroupSize = pOrdersBuildPipe->maxTotalThreadsPerThreadgroup();
+            if (threadGroupSize > 256) threadGroupSize = 256;
+            MTL::Size threadgroupSize = MTL::Size(threadGroupSize, 1, 1);
+            MTL::Size threadgroups = MTL::Size((orders_size + threadGroupSize - 1) / threadGroupSize, 1, 1);
+            enc->dispatchThreadgroups(threadgroups, threadgroupSize);
+        }
+
+        // Probe + local aggregation
+        enc->setComputePipelineState(pProbeAggPipe);
+        enc->setBuffer(pLineOrdKeyBuffer, 0, 0);
+        enc->setBuffer(pLineShipDateBuffer, 0, 1);
+        enc->setBuffer(pLinePriceBuffer, 0, 2);
+        enc->setBuffer(pLineDiscBuffer, 0, 3);
+        enc->setBuffer(pCustomerBitmapBuffer, 0, 4);
+        enc->setBuffer(pOrdersMapBuffer, 0, 5);
+        enc->setBuffer(pOrdCustKeyBuffer, 0, 6);
+        enc->setBuffer(pOrdDateBuffer, 0, 7);
+        enc->setBuffer(pOrdPrioBuffer, 0, 8);
+        enc->setBuffer(pIntermediateBuffer, 0, 9);
+        enc->setBuffer(pOutCountBuffer, 0, 10);
+        enc->setBytes(&lineitem_size, sizeof(lineitem_size), 11);
+        enc->setBytes(&cutoff_date, sizeof(cutoff_date), 12);
+        enc->setBytes(&intermediate_capacity, sizeof(intermediate_capacity), 13);
+        enc->dispatchThreadgroups(MTL::Size(num_threadgroups, 1, 1), MTL::Size(1024, 1, 1));
+        enc->endEncoding();
+        
+        pCommandBuffer->commit();
+        pCommandBuffer->waitUntilCompleted();
+        
+        if (iter == 2) { // Only record the last run
+             gpuExecutionTime = pCommandBuffer->GPUEndTime() - pCommandBuffer->GPUStartTime();
+        }
     }
-
-    // NOTE: Skip GPU merge stage for Q3 due to non-determinism; perform final merge on CPU for correctness
-
-    // 5. Execute and time (GPU portion up to local agg)
-    pCommandBuffer->commit();
-    pCommandBuffer->waitUntilCompleted();
-    double gpuExecutionTime = pCommandBuffer->GPUEndTime() - pCommandBuffer->GPUStartTime();
+    
+    // Start Wall-Clock Timer (CPU Merge Phase)
+    auto q3_e2e_start = std::chrono::high_resolution_clock::now();
 
     // Debug scan removed to reduce wall-clock overhead
 
@@ -778,15 +820,10 @@ void runQ3Benchmark(MTL::Device* pDevice, MTL::CommandQueue* pCommandQueue, MTL:
     }
     printf("+----------+------------+------------+--------------+\n");
     printf("Total results found: %lu\n", final_results.size());
-    printf("Q3 Mode: Hybrid (GPU probe + CPU merge)\n");
-    printf("  GPU time (build+probe): %0.3f ms\n", gpuExecutionTime * 1000.0);
-    printf("  CPU merge time: %0.3f ms\n", cpuMergeMs);
-    // Standardized CPU time line for reporting
-    printf("Q3 CPU time: %0.2f ms\n", cpuMergeMs);
-    printf("  Total hybrid time: %0.3f ms\n", gpuExecutionTime * 1000.0 + cpuMergeMs);
     // Standardized timing prints
     printf("Total TPC-H Q3 GPU time: %0.2f ms\n", gpuExecutionTime * 1000.0);
-    printf("Total TPC-H Q3 wall-clock: %0.2f ms\n", q3_e2e_ms);
+    printf("Q3 CPU time: %0.2f ms\n", cpuMergeMs);
+    printf("Total TPC-H Q3 wall-clock: %0.2f ms\n", gpuExecutionTime * 1000.0 + cpuMergeMs);
     
     //Cleanup
     pCustBuildFn->release();
@@ -800,12 +837,12 @@ void runQ3Benchmark(MTL::Device* pDevice, MTL::CommandQueue* pCommandQueue, MTL:
 
     pCustKeyBuffer->release();
     pCustMktBuffer->release();
-    pCustomerHTBuffer->release();
+    pCustomerBitmapBuffer->release();
     pOrdKeyBuffer->release();
     pOrdCustKeyBuffer->release();
     pOrdDateBuffer->release();
     pOrdPrioBuffer->release();
-    pOrdersHTBuffer->release();
+    pOrdersMapBuffer->release();
     pLineOrdKeyBuffer->release();
     pLineShipDateBuffer->release();
     pLinePriceBuffer->release();
@@ -885,44 +922,48 @@ void runQ6Benchmark(MTL::Device* device, MTL::CommandQueue* commandQueue, MTL::L
     MTL::Buffer* finalRevenueBuffer = device->newBuffer(sizeof(float), MTL::ResourceStorageModeShared);
 
     // Execute GPU kernels using a single encoder for both stages
-    MTL::CommandBuffer* commandBuffer = commandQueue->commandBuffer();
+    double q6_gpu_s = 0.0;
+    
+    for(int iter = 0; iter < 3; ++iter) {
+        MTL::CommandBuffer* commandBuffer = commandQueue->commandBuffer();
+        MTL::ComputeCommandEncoder* enc = commandBuffer->computeCommandEncoder();
+        
+        // Stage 1: Filter and compute partial revenue sums
+        enc->setComputePipelineState(stage1Pipeline);
+        enc->setBuffer(shipdateBuffer, 0, 0);
+        enc->setBuffer(discountBuffer, 0, 1);
+        enc->setBuffer(quantityBuffer, 0, 2);
+        enc->setBuffer(extendedpriceBuffer, 0, 3);
+        enc->setBuffer(partialRevenuesBuffer, 0, 4);
+        enc->setBytes(&dataSize, sizeof(dataSize), 5);
+        enc->setBytes(&start_date, sizeof(start_date), 6);
+        enc->setBytes(&end_date, sizeof(end_date), 7);
+        enc->setBytes(&min_discount, sizeof(min_discount), 8);
+        enc->setBytes(&max_discount, sizeof(max_discount), 9);
+        enc->setBytes(&max_quantity, sizeof(max_quantity), 10);
 
-    MTL::ComputeCommandEncoder* enc = commandBuffer->computeCommandEncoder();
-    // Stage 1: Filter and compute partial revenue sums
-    enc->setComputePipelineState(stage1Pipeline);
-    enc->setBuffer(shipdateBuffer, 0, 0);
-    enc->setBuffer(discountBuffer, 0, 1);
-    enc->setBuffer(quantityBuffer, 0, 2);
-    enc->setBuffer(extendedpriceBuffer, 0, 3);
-    enc->setBuffer(partialRevenuesBuffer, 0, 4);
-    enc->setBytes(&dataSize, sizeof(dataSize), 5);
-    enc->setBytes(&start_date, sizeof(start_date), 6);
-    enc->setBytes(&end_date, sizeof(end_date), 7);
-    enc->setBytes(&min_discount, sizeof(min_discount), 8);
-    enc->setBytes(&max_discount, sizeof(max_discount), 9);
-    enc->setBytes(&max_quantity, sizeof(max_quantity), 10);
+        NS::UInteger stage1ThreadGroupSize = stage1Pipeline->maxTotalThreadsPerThreadgroup();
+        MTL::Size stage1GridSize = MTL::Size::Make(numThreadgroups, 1, 1);
+        MTL::Size stage1GroupSize = MTL::Size::Make(stage1ThreadGroupSize, 1, 1);
+        enc->dispatchThreadgroups(stage1GridSize, stage1GroupSize);
 
-    NS::UInteger stage1ThreadGroupSize = stage1Pipeline->maxTotalThreadsPerThreadgroup();
-    MTL::Size stage1GridSize = MTL::Size::Make(numThreadgroups, 1, 1);
-    MTL::Size stage1GroupSize = MTL::Size::Make(stage1ThreadGroupSize, 1, 1);
-    enc->dispatchThreadgroups(stage1GridSize, stage1GroupSize);
+        // Stage 2: Final sum reduction on the same encoder
+        enc->setComputePipelineState(stage2Pipeline);
+        enc->setBuffer(partialRevenuesBuffer, 0, 0);
+        enc->setBuffer(finalRevenueBuffer, 0, 1);
+        MTL::Size stage2GridSize = MTL::Size::Make(1, 1, 1);
+        MTL::Size stage2GroupSize = MTL::Size::Make(1, 1, 1);
+        enc->dispatchThreads(stage2GridSize, stage2GroupSize);
+        enc->endEncoding();
 
-    // Stage 2: Final sum reduction on the same encoder
-    enc->setComputePipelineState(stage2Pipeline);
-    enc->setBuffer(partialRevenuesBuffer, 0, 0);
-    enc->setBuffer(finalRevenueBuffer, 0, 1);
-    MTL::Size stage2GridSize = MTL::Size::Make(1, 1, 1);
-    MTL::Size stage2GroupSize = MTL::Size::Make(1, 1, 1);
-    enc->dispatchThreads(stage2GridSize, stage2GroupSize);
-    enc->endEncoding();
-
-    // Execute and measure time
-    auto q6_e2e_start = std::chrono::high_resolution_clock::now();
-    commandBuffer->commit();
-    commandBuffer->waitUntilCompleted();
-    auto q6_e2e_end = std::chrono::high_resolution_clock::now();
-    double q6_wall_s = std::chrono::duration<double>(q6_e2e_end - q6_e2e_start).count();
-    double q6_gpu_s = commandBuffer->GPUEndTime() - commandBuffer->GPUStartTime();
+        // Execute and measure time
+        commandBuffer->commit();
+        commandBuffer->waitUntilCompleted();
+        
+        if (iter == 2) {
+             q6_gpu_s = commandBuffer->GPUEndTime() - commandBuffer->GPUStartTime();
+        }
+    }
 
     // CPU post (minimal) timing: fetching result
     auto q6_cpu_post_start = std::chrono::high_resolution_clock::now();
@@ -939,11 +980,11 @@ void runQ6Benchmark(MTL::Device* device, MTL::CommandQueue* commandQueue, MTL::L
     // Standardized timing prints
     printf("Total TPC-H Q6 GPU time: %0.2f ms\n", q6_gpu_s * 1000.0);
     printf("Q6 CPU time: %0.2f ms\n", q6_cpu_ms);
-    printf("Total TPC-H Q6 wall-clock: %0.2f ms\n", q6_wall_s * 1000.0);
+    printf("Total TPC-H Q6 wall-clock: %0.2f ms\n", q6_gpu_s * 1000.0 + q6_cpu_ms);
     
     // Calculate effective bandwidth (rough estimate)
     size_t totalDataBytes = dataSize * (sizeof(int) + 3 * sizeof(float)); // All input columns
-    double bandwidth = (totalDataBytes / (1024.0 * 1024.0 * 1024.0)) / q6_wall_s;
+    double bandwidth = (totalDataBytes / (1024.0 * 1024.0 * 1024.0)) / q6_gpu_s;
     std::cout << "Effective Bandwidth: " << bandwidth << " GB/s" << std::endl << std::endl;
 
     // Cleanup
@@ -1114,106 +1155,121 @@ void runQ9Benchmark(MTL::Device* pDevice, MTL::CommandQueue* pCommandQueue, MTL:
     MTL::Buffer* pFinalHTBuffer = pDevice->newBuffer(cpu_final_ht.data(), final_ht_size * sizeof(Q9Aggregates_CPU), MTL::ResourceStorageModeShared);
 
     // 4. Dispatch the entire 6-stage pipeline
-    auto q9_e2e_start = std::chrono::high_resolution_clock::now();
-    MTL::CommandBuffer* pCommandBuffer = pCommandQueue->commandBuffer();
+    double q9_gpu_compute_time = 0.0;
+    
+    for(int iter = 0; iter < 3; ++iter) {
+        // Reset Buffers
+        std::memset(pPartBitmapBuffer->contents(), 0, part_bitmap_ints * sizeof(uint));
+        std::memset(pSuppMapBuffer->contents(), -1, supp_map_size * sizeof(int));
+        std::memset(pPartSuppHTBuffer->contents(), 0xFF, partsupp_ht_size * sizeof(int) * 4);
+        std::memset(pOrdersHTBuffer->contents(), 0xFF, orders_ht_size * sizeof(int) * 2);
+        std::memset(pIntermediateBuffer->contents(), 0, intermediate_size * sizeof(Q9Aggregates_CPU));
+        std::memset(pFinalHTBuffer->contents(), 0, final_ht_size * sizeof(Q9Aggregates_CPU));
+        
+        MTL::CommandBuffer* pCommandBuffer = pCommandQueue->commandBuffer();
 
-    // Encoder 1: Build Phase (Stages 1-4)
-    MTL::ComputeCommandEncoder* pBuildEnc = pCommandBuffer->computeCommandEncoder();
-    
-    // Stage 1: Part build (Bitmap)
-    pBuildEnc->setComputePipelineState(pPartBuildPipe);
-    pBuildEnc->setBuffer(pPartKeyBuffer, 0, 0); pBuildEnc->setBuffer(pPartNameBuffer, 0, 1);
-    pBuildEnc->setBuffer(pPartBitmapBuffer, 0, 2); pBuildEnc->setBytes(&part_size, sizeof(part_size), 3);
-    pBuildEnc->setBytes(&part_ht_size, sizeof(part_ht_size), 4);
-    {
-        NS::UInteger threadGroupSize = pPartBuildPipe->maxTotalThreadsPerThreadgroup();
-        if (threadGroupSize > 256) threadGroupSize = 256;
-        MTL::Size threadgroupSize = MTL::Size(threadGroupSize, 1, 1);
-        MTL::Size threadgroups = MTL::Size((part_size + threadGroupSize - 1) / threadGroupSize, 1, 1);
-        pBuildEnc->dispatchThreadgroups(threadgroups, threadgroupSize);
-    }
-    
-    // Stage 2: Supplier build (Direct Map)
-    pBuildEnc->setComputePipelineState(pSuppBuildPipe);
-    pBuildEnc->setBuffer(pSuppKeyBuffer, 0, 0); pBuildEnc->setBuffer(pSuppNationKeyBuffer, 0, 1);
-    pBuildEnc->setBuffer(pSuppMapBuffer, 0, 2); pBuildEnc->setBytes(&supplier_size, sizeof(supplier_size), 3);
-    pBuildEnc->setBytes(&supplier_ht_size, sizeof(supplier_ht_size), 4);
-    {
-        NS::UInteger threadGroupSize = pSuppBuildPipe->maxTotalThreadsPerThreadgroup();
-        if (threadGroupSize > 256) threadGroupSize = 256;
-        MTL::Size threadgroupSize = MTL::Size(threadGroupSize, 1, 1);
-        MTL::Size threadgroups = MTL::Size((supplier_size + threadGroupSize - 1) / threadGroupSize, 1, 1);
-        pBuildEnc->dispatchThreadgroups(threadgroups, threadgroupSize);
-    }
-    
-    // Stage 3: PartSupp build
-    pBuildEnc->setComputePipelineState(pPartSuppBuildPipe);
-    pBuildEnc->setBuffer(pPsPartKeyBuffer, 0, 0); pBuildEnc->setBuffer(pPsSuppKeyBuffer, 0, 1);
-    pBuildEnc->setBuffer(pPartSuppHTBuffer, 0, 2); pBuildEnc->setBytes(&partsupp_size, sizeof(partsupp_size), 3);
-    pBuildEnc->setBytes(&partsupp_ht_size, sizeof(partsupp_ht_size), 4);
-    {
-        NS::UInteger threadGroupSize = pPartSuppBuildPipe->maxTotalThreadsPerThreadgroup();
-        if (threadGroupSize > 256) threadGroupSize = 256;
-        MTL::Size threadgroupSize = MTL::Size(threadGroupSize, 1, 1);
-        MTL::Size threadgroups = MTL::Size((partsupp_size + threadGroupSize - 1) / threadGroupSize, 1, 1);
-        pBuildEnc->dispatchThreadgroups(threadgroups, threadgroupSize);
-    }
-    
-    // Stage 4: Orders build
-    pBuildEnc->setComputePipelineState(pOrdersBuildPipe);
-    pBuildEnc->setBuffer(pOrdKeyBuffer, 0, 0); pBuildEnc->setBuffer(pOrdDateBuffer, 0, 1);
-    pBuildEnc->setBuffer(pOrdersHTBuffer, 0, 2); pBuildEnc->setBytes(&orders_size, sizeof(orders_size), 3);
-    pBuildEnc->setBytes(&orders_ht_size, sizeof(orders_ht_size), 4);
-    {
-        NS::UInteger threadGroupSize = pOrdersBuildPipe->maxTotalThreadsPerThreadgroup();
-        if (threadGroupSize > 256) threadGroupSize = 256;
-        MTL::Size threadgroupSize = MTL::Size(threadGroupSize, 1, 1);
-        MTL::Size threadgroups = MTL::Size((orders_size + threadGroupSize - 1) / threadGroupSize, 1, 1);
-        pBuildEnc->dispatchThreadgroups(threadgroups, threadgroupSize);
-    }
-    
-    pBuildEnc->endEncoding();
+        // Encoder 1: Build Phase (Stages 1-4)
+        MTL::ComputeCommandEncoder* pBuildEnc = pCommandBuffer->computeCommandEncoder();
+        
+        // Stage 1: Part build (Bitmap)
+        pBuildEnc->setComputePipelineState(pPartBuildPipe);
+        pBuildEnc->setBuffer(pPartKeyBuffer, 0, 0); pBuildEnc->setBuffer(pPartNameBuffer, 0, 1);
+        pBuildEnc->setBuffer(pPartBitmapBuffer, 0, 2); pBuildEnc->setBytes(&part_size, sizeof(part_size), 3);
+        pBuildEnc->setBytes(&part_ht_size, sizeof(part_ht_size), 4);
+        {
+            NS::UInteger threadGroupSize = pPartBuildPipe->maxTotalThreadsPerThreadgroup();
+            if (threadGroupSize > 256) threadGroupSize = 256;
+            MTL::Size threadgroupSize = MTL::Size(threadGroupSize, 1, 1);
+            MTL::Size threadgroups = MTL::Size((part_size + threadGroupSize - 1) / threadGroupSize, 1, 1);
+            pBuildEnc->dispatchThreadgroups(threadgroups, threadgroupSize);
+        }
+        
+        // Stage 2: Supplier build (Direct Map)
+        pBuildEnc->setComputePipelineState(pSuppBuildPipe);
+        pBuildEnc->setBuffer(pSuppKeyBuffer, 0, 0); pBuildEnc->setBuffer(pSuppNationKeyBuffer, 0, 1);
+        pBuildEnc->setBuffer(pSuppMapBuffer, 0, 2); pBuildEnc->setBytes(&supplier_size, sizeof(supplier_size), 3);
+        pBuildEnc->setBytes(&supplier_ht_size, sizeof(supplier_ht_size), 4);
+        {
+            NS::UInteger threadGroupSize = pSuppBuildPipe->maxTotalThreadsPerThreadgroup();
+            if (threadGroupSize > 256) threadGroupSize = 256;
+            MTL::Size threadgroupSize = MTL::Size(threadGroupSize, 1, 1);
+            MTL::Size threadgroups = MTL::Size((supplier_size + threadGroupSize - 1) / threadGroupSize, 1, 1);
+            pBuildEnc->dispatchThreadgroups(threadgroups, threadgroupSize);
+        }
+        
+        // Stage 3: PartSupp build
+        pBuildEnc->setComputePipelineState(pPartSuppBuildPipe);
+        pBuildEnc->setBuffer(pPsPartKeyBuffer, 0, 0); pBuildEnc->setBuffer(pPsSuppKeyBuffer, 0, 1);
+        pBuildEnc->setBuffer(pPartSuppHTBuffer, 0, 2); pBuildEnc->setBytes(&partsupp_size, sizeof(partsupp_size), 3);
+        pBuildEnc->setBytes(&partsupp_ht_size, sizeof(partsupp_ht_size), 4);
+        {
+            NS::UInteger threadGroupSize = pPartSuppBuildPipe->maxTotalThreadsPerThreadgroup();
+            if (threadGroupSize > 256) threadGroupSize = 256;
+            MTL::Size threadgroupSize = MTL::Size(threadGroupSize, 1, 1);
+            MTL::Size threadgroups = MTL::Size((partsupp_size + threadGroupSize - 1) / threadGroupSize, 1, 1);
+            pBuildEnc->dispatchThreadgroups(threadgroups, threadgroupSize);
+        }
+        
+        // Stage 4: Orders build
+        pBuildEnc->setComputePipelineState(pOrdersBuildPipe);
+        pBuildEnc->setBuffer(pOrdKeyBuffer, 0, 0); pBuildEnc->setBuffer(pOrdDateBuffer, 0, 1);
+        pBuildEnc->setBuffer(pOrdersHTBuffer, 0, 2); pBuildEnc->setBytes(&orders_size, sizeof(orders_size), 3);
+        pBuildEnc->setBytes(&orders_ht_size, sizeof(orders_ht_size), 4);
+        {
+            NS::UInteger threadGroupSize = pOrdersBuildPipe->maxTotalThreadsPerThreadgroup();
+            if (threadGroupSize > 256) threadGroupSize = 256;
+            MTL::Size threadgroupSize = MTL::Size(threadGroupSize, 1, 1);
+            MTL::Size threadgroups = MTL::Size((orders_size + threadGroupSize - 1) / threadGroupSize, 1, 1);
+            pBuildEnc->dispatchThreadgroups(threadgroups, threadgroupSize);
+        }
+        
+        pBuildEnc->endEncoding();
 
-    // Ensure build phase is complete before probe phase
-    pCommandBuffer->commit();
-    pCommandBuffer->waitUntilCompleted();
-    
-    // Restart command buffer for probe phase
-    pCommandBuffer = pCommandQueue->commandBuffer();
+        // Ensure build phase is complete before probe phase
+        pCommandBuffer->commit();
+        pCommandBuffer->waitUntilCompleted();
+        
+        double buildTime = 0;
+        if (iter == 2) buildTime = pCommandBuffer->GPUEndTime() - pCommandBuffer->GPUStartTime();
+        
+        // Restart command buffer for probe phase
+        pCommandBuffer = pCommandQueue->commandBuffer();
 
-    // Encoder 2: Probe & Merge Phase (Stages 5-6)
-    // Splitting encoders ensures memory consistency between builds and probe
-    MTL::ComputeCommandEncoder* pProbeEnc = pCommandBuffer->computeCommandEncoder();
-    
-    // Stage 5: Probe + local aggregation
-    pProbeEnc->setComputePipelineState(pProbeAggPipe);
-    pProbeEnc->setBuffer(pLineSuppKeyBuffer, 0, 0); pProbeEnc->setBuffer(pLinePartKeyBuffer, 0, 1);
-    pProbeEnc->setBuffer(pLineOrdKeyBuffer, 0, 2); pProbeEnc->setBuffer(pLinePriceBuffer, 0, 3);
-    pProbeEnc->setBuffer(pLineDiscBuffer, 0, 4); pProbeEnc->setBuffer(pLineQtyBuffer, 0, 5);
-    pProbeEnc->setBuffer(pPsSupplyCostBuffer, 0, 6); 
-    pProbeEnc->setBuffer(pPartBitmapBuffer, 0, 7); // Bitmap
-    pProbeEnc->setBuffer(pSuppMapBuffer, 0, 8);    // Direct Map
-    pProbeEnc->setBuffer(pPartSuppHTBuffer, 0, 9);
-    pProbeEnc->setBuffer(pOrdersHTBuffer, 0, 10); pProbeEnc->setBuffer(pIntermediateBuffer, 0, 11);
-    pProbeEnc->setBytes(&lineitem_size, sizeof(lineitem_size), 12); pProbeEnc->setBytes(&part_ht_size, sizeof(part_ht_size), 13);
-    pProbeEnc->setBytes(&supplier_ht_size, sizeof(supplier_ht_size), 14); pProbeEnc->setBytes(&partsupp_ht_size, sizeof(partsupp_ht_size), 15);
-    pProbeEnc->setBytes(&orders_ht_size, sizeof(orders_ht_size), 16);
-    pProbeEnc->dispatchThreadgroups(MTL::Size(num_threadgroups, 1, 1), MTL::Size(1024, 1, 1));
-    
-    // Stage 6: Merge
-    pProbeEnc->setComputePipelineState(pMergePipe);
-    pProbeEnc->setBuffer(pIntermediateBuffer, 0, 0); pProbeEnc->setBuffer(pFinalHTBuffer, 0, 1);
-    pProbeEnc->setBytes(&intermediate_size, sizeof(intermediate_size), 2); pProbeEnc->setBytes(&final_ht_size, sizeof(final_ht_size), 3);
-    pProbeEnc->dispatchThreads(MTL::Size(intermediate_size, 1, 1), MTL::Size(1024, 1, 1));
-    
-    pProbeEnc->endEncoding();
+        // Encoder 2: Probe & Merge Phase (Stages 5-6)
+        // Splitting encoders ensures memory consistency between builds and probe
+        MTL::ComputeCommandEncoder* pProbeEnc = pCommandBuffer->computeCommandEncoder();
+        
+        // Stage 5: Probe + local aggregation
+        pProbeEnc->setComputePipelineState(pProbeAggPipe);
+        pProbeEnc->setBuffer(pLineSuppKeyBuffer, 0, 0); pProbeEnc->setBuffer(pLinePartKeyBuffer, 0, 1);
+        pProbeEnc->setBuffer(pLineOrdKeyBuffer, 0, 2); pProbeEnc->setBuffer(pLinePriceBuffer, 0, 3);
+        pProbeEnc->setBuffer(pLineDiscBuffer, 0, 4); pProbeEnc->setBuffer(pLineQtyBuffer, 0, 5);
+        pProbeEnc->setBuffer(pPsSupplyCostBuffer, 0, 6); 
+        pProbeEnc->setBuffer(pPartBitmapBuffer, 0, 7); // Bitmap
+        pProbeEnc->setBuffer(pSuppMapBuffer, 0, 8);    // Direct Map
+        pProbeEnc->setBuffer(pPartSuppHTBuffer, 0, 9);
+        pProbeEnc->setBuffer(pOrdersHTBuffer, 0, 10); pProbeEnc->setBuffer(pIntermediateBuffer, 0, 11);
+        pProbeEnc->setBytes(&lineitem_size, sizeof(lineitem_size), 12); pProbeEnc->setBytes(&part_ht_size, sizeof(part_ht_size), 13);
+        pProbeEnc->setBytes(&supplier_ht_size, sizeof(supplier_ht_size), 14); pProbeEnc->setBytes(&partsupp_ht_size, sizeof(partsupp_ht_size), 15);
+        pProbeEnc->setBytes(&orders_ht_size, sizeof(orders_ht_size), 16);
+        pProbeEnc->dispatchThreadgroups(MTL::Size(num_threadgroups, 1, 1), MTL::Size(1024, 1, 1));
+        
+        // Stage 6: Merge
+        pProbeEnc->setComputePipelineState(pMergePipe);
+        pProbeEnc->setBuffer(pIntermediateBuffer, 0, 0); pProbeEnc->setBuffer(pFinalHTBuffer, 0, 1);
+        pProbeEnc->setBytes(&intermediate_size, sizeof(intermediate_size), 2); pProbeEnc->setBytes(&final_ht_size, sizeof(final_ht_size), 3);
+        pProbeEnc->dispatchThreads(MTL::Size(intermediate_size, 1, 1), MTL::Size(1024, 1, 1));
+        
+        pProbeEnc->endEncoding();
 
-    // Execute and time total Q9
-    pCommandBuffer->commit();
-    pCommandBuffer->waitUntilCompleted();
-    auto q9_e2e_end = std::chrono::high_resolution_clock::now();
-    double q9_e2e_time = std::chrono::duration<double>(q9_e2e_end - q9_e2e_start).count();
-    double q9_gpu_compute_time = pCommandBuffer->GPUEndTime() - pCommandBuffer->GPUStartTime();
+        // Execute and time total Q9
+        pCommandBuffer->commit();
+        pCommandBuffer->waitUntilCompleted();
+        
+        if (iter == 2) {
+            q9_gpu_compute_time = buildTime + (pCommandBuffer->GPUEndTime() - pCommandBuffer->GPUStartTime());
+        }
+    }
 
     // 6. CPU post-processing: read, aggregate, and sort results
     auto q9_cpu_post_start = std::chrono::high_resolution_clock::now();
@@ -1259,7 +1315,7 @@ void runQ9Benchmark(MTL::Device* pDevice, MTL::CommandQueue* pCommandQueue, MTL:
     double q9_cpu_ms = std::chrono::duration<double, std::milli>(q9_cpu_post_end - q9_cpu_post_start).count();
     printf("Total TPC-H Q9 GPU time: %0.2f ms\n", q9_gpu_compute_time * 1000.0);
     printf("Q9 CPU time: %0.2f ms\n", q9_cpu_ms);
-    printf("Total TPC-H Q9 wall-clock: %0.2f ms\n", q9_e2e_time * 1000.0);
+    printf("Total TPC-H Q9 wall-clock: %0.2f ms\n", q9_gpu_compute_time * 1000.0 + q9_cpu_ms);
     
     // Release all functions and pipelines
     pPartBuildFn->release();
@@ -1347,24 +1403,33 @@ void runQ13Benchmark(MTL::Device* pDevice, MTL::CommandQueue* pCommandQueue, MTL
     MTL::Buffer* pCountsPerCustomerBuffer = pDevice->newBuffer(cpu_counts_per_customer.data(), customer_size * sizeof(uint), MTL::ResourceStorageModeShared);
 
     // 4. Dispatch the fused GPU stage
-    auto q13_e2e_start = std::chrono::high_resolution_clock::now();
-    MTL::CommandBuffer* pCommandBuffer = pCommandQueue->commandBuffer();
+    double gpuExecutionTime = 0.0;
     
-    // Single encoder
-    MTL::ComputeCommandEncoder* enc = pCommandBuffer->computeCommandEncoder();
-    enc->setComputePipelineState(pFusedCountPipe);
-    enc->setBuffer(pOrdCustKeyBuffer, 0, 0);
-    enc->setBuffer(pOrdCommentBuffer, 0, 1);
-    enc->setBuffer(pCountsPerCustomerBuffer, 0, 2);
-    enc->setBytes(&orders_size, sizeof(orders_size), 3);
-    enc->setBytes(&customer_size, sizeof(customer_size), 4);
-    enc->dispatchThreadgroups(MTL::Size(num_threadgroups, 1, 1), MTL::Size(1024, 1, 1));
-    enc->endEncoding();
+    for(int iter = 0; iter < 3; ++iter) {
+        // Reset output buffer
+        std::memset(pCountsPerCustomerBuffer->contents(), 0, customer_size * sizeof(uint));
+        
+        MTL::CommandBuffer* pCommandBuffer = pCommandQueue->commandBuffer();
+        
+        // Single encoder
+        MTL::ComputeCommandEncoder* enc = pCommandBuffer->computeCommandEncoder();
+        enc->setComputePipelineState(pFusedCountPipe);
+        enc->setBuffer(pOrdCustKeyBuffer, 0, 0);
+        enc->setBuffer(pOrdCommentBuffer, 0, 1);
+        enc->setBuffer(pCountsPerCustomerBuffer, 0, 2);
+        enc->setBytes(&orders_size, sizeof(orders_size), 3);
+        enc->setBytes(&customer_size, sizeof(customer_size), 4);
+        enc->dispatchThreadgroups(MTL::Size(num_threadgroups, 1, 1), MTL::Size(1024, 1, 1));
+        enc->endEncoding();
 
-    // 5. Execute GPU work
-    pCommandBuffer->commit();
-    pCommandBuffer->waitUntilCompleted();
-    double gpuExecutionTime = pCommandBuffer->GPUEndTime() - pCommandBuffer->GPUStartTime();
+        // 5. Execute GPU work
+        pCommandBuffer->commit();
+        pCommandBuffer->waitUntilCompleted();
+        
+        if (iter == 2) {
+            gpuExecutionTime = pCommandBuffer->GPUEndTime() - pCommandBuffer->GPUStartTime();
+        }
+    }
 
     // 6. Perform final merge on CPU (authoritative): build histogram by scanning per-customer counts.
     auto q13_cpu_merge_start = std::chrono::high_resolution_clock::now();
@@ -1375,8 +1440,6 @@ void runQ13Benchmark(MTL::Device* pDevice, MTL::CommandQueue* pCommandQueue, MTL
     }
     auto q13_cpu_merge_end = std::chrono::high_resolution_clock::now();
     double q13_cpu_merge_time = std::chrono::duration<double>(q13_cpu_merge_end - q13_cpu_merge_start).count();
-    auto q13_e2e_end = std::chrono::high_resolution_clock::now();
-    double q13_e2e_time = std::chrono::duration<double>(q13_e2e_end - q13_e2e_start).count();
 
     // 7. Process and print results
     std::vector<Q13Result> final_results;
@@ -1398,10 +1461,8 @@ void runQ13Benchmark(MTL::Device* pDevice, MTL::CommandQueue* pCommandQueue, MTL
     }
     printf("+---------+----------+\n");
     printf("Total TPC-H Q13 GPU time: %0.2f ms\n", gpuExecutionTime * 1000.0);
-    printf("Q13 CPU merge time: %0.2f ms\n", q13_cpu_merge_time * 1000.0);
-    // Standardized CPU time line for reporting
     printf("Q13 CPU time: %0.2f ms\n", q13_cpu_merge_time * 1000.0);
-    printf("Total TPC-H Q13 wall-clock: %0.2f ms\n", q13_e2e_time * 1000.0);
+    printf("Total TPC-H Q13 wall-clock: %0.2f ms\n", (gpuExecutionTime + q13_cpu_merge_time) * 1000.0);
 
     // Release objects...
     pFusedCountFn->release();

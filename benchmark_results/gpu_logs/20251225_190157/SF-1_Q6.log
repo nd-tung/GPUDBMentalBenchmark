@@ -1,0 +1,13 @@
+=== GPU Metal Q6 Results ===
+Timestamp: 20251225_190157
+Scale Factor: SF-1
+Query: Q6
+
+--- Running TPC-H Query 6 Benchmark ---
+Loaded 6001215 rows for TPC-H Query 6.
+TPC-H Query 6 Result:
+Total Revenue: $123141000.00
+Total TPC-H Q6 GPU time: 1.65 ms
+Q6 CPU time: 0.00 ms
+Total TPC-H Q6 wall-clock: 1.65 ms
+Effective Bandwidth: 54.05 GB/s

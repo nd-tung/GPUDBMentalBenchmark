@@ -1,0 +1,154 @@
+=== CedarDB Q13 Results ===
+Timestamp: 20251225_191807
+Scale Factor: SF-10
+Query: Q13
+
+Timing is on.
+WARNING:  Please file a bug report: Race detected in coolPage(), oldSwip: nullptr, frame: 0000fff2156eb360
+WARNING:  Please file a bug report: Race detected in coolPage(), oldSwip: nullptr, frame: 0000fff2156ee2a0
+WARNING:  Please file a bug report: Race detected in coolPage(), oldSwip: nullptr, frame: 0000fff2156f0700
+WARNING:  Please file a bug report: Race detected in coolPage(), oldSwip: nullptr, frame: 0000fff2157f0f00
+WARNING:  Please file a bug report: Race detected in coolPage(), oldSwip: nullptr, frame: 0000fff2156f0a60
+WARNING:  Please file a bug report: Race detected in coolPage(), oldSwip: nullptr, frame: 0000fff2157e1a20
+WARNING:  Please file a bug report: Race detected in coolPage(), oldSwip: nullptr, frame: 0000fff2157ec2e0
+WARNING:  Please file a bug report: Race detected in coolPage(), oldSwip: nullptr, frame: 0000fff2157e1de0
+WARNING:  Please file a bug report: Race detected in coolPage(), oldSwip: nullptr, frame: 0000fff2157e2080
+WARNING:  Please file a bug report: Race detected in coolPage(), oldSwip: nullptr, frame: 0000fff2157e7cc0
+WARNING:  Please file a bug report: Race detected in coolPage(), oldSwip: nullptr, frame: 0000fff2156e49a0
+WARNING:  Please file a bug report: Race detected in coolPage(), oldSwip: nullptr, frame: 0000fff215701f20
+WARNING:  Please file a bug report: Race detected in coolPage(), oldSwip: nullptr, frame: 0000fff2156fe260
+WARNING:  Please file a bug report: Race detected in coolPage(), oldSwip: nullptr, frame: 0000fff2156fcee0
+WARNING:  Please file a bug report: Race detected in coolPage(), oldSwip: nullptr, frame: 0000fff2157923a0
+WARNING:  Please file a bug report: Race detected in coolPage(), oldSwip: nullptr, frame: 0000fff2157f3de0
+WARNING:  Please file a bug report: Race detected in coolPage(), oldSwip: nullptr, frame: 0000fff21579a6e0
+WARNING:  Please file a bug report: Race detected in coolPage(), oldSwip: nullptr, frame: 0000fff2156e3b00
+WARNING:  Please file a bug report: Race detected in coolPage(), oldSwip: nullptr, frame: 0000fff2156fe5c0
+WARNING:  Please file a bug report: Race detected in coolPage(), oldSwip: nullptr, frame: 0000fff215787e40
+WARNING:  Please file a bug report: Race detected in coolPage(), oldSwip: nullptr, frame: 0000fff215797c20
+WARNING:  Please file a bug report: Race detected in coolPage(), oldSwip: nullptr, frame: 0000fff2156ed6a0
+WARNING:  Please file a bug report: Race detected in coolPage(), oldSwip: nullptr, frame: 0000fff2157fa980
+WARNING:  Please file a bug report: Race detected in coolPage(), oldSwip: nullptr, frame: 0000fff2156f06a0
+WARNING:  Please file a bug report: Race detected in coolPage(), oldSwip: nullptr, frame: 0000fff2156fc220
+WARNING:  Please file a bug report: Race detected in coolPage(), oldSwip: nullptr, frame: 0000fff2156fb020
+WARNING:  Please file a bug report: Race detected in coolPage(), oldSwip: nullptr, frame: 0000fff2157df740
+WARNING:  Please file a bug report: Race detected in coolPage(), oldSwip: nullptr, frame: 0000fff21579f9c0
+WARNING:  Please file a bug report: Race detected in coolPage(), oldSwip: nullptr, frame: 0000fff2156f70c0
+WARNING:  Please file a bug report: Race detected in coolPage(), oldSwip: nullptr, frame: 0000fff2156fcb20
+WARNING:  Please file a bug report: Race detected in coolPage(), oldSwip: nullptr, frame: 0000fff2156f0700
+WARNING:  Please file a bug report: Race detected in coolPage(), oldSwip: nullptr, frame: 0000fff2157da4c0
+WARNING:  Please file a bug report: Race detected in coolPage(), oldSwip: nullptr, frame: 0000fff215787e40
+WARNING:  Please file a bug report: Race detected in coolPage(), oldSwip: nullptr, frame: 0000fff21579ee80
+WARNING:  Please file a bug report: Race detected in coolPage(), oldSwip: nullptr, frame: 0000fff2157eeb00
+WARNING:  Please file a bug report: Race detected in coolPage(), oldSwip: nullptr, frame: 0000fff2157911a0
+WARNING:  Please file a bug report: Race detected in coolPage(), oldSwip: nullptr, frame: 0000fff2156fae40
+WARNING:  Please file a bug report: Race detected in coolPage(), oldSwip: nullptr, frame: 0000fff2156ff640
+WARNING:  Please file a bug report: Race detected in coolPage(), oldSwip: nullptr, frame: 0000fff2157f2b80
+WARNING:  Please file a bug report: Race detected in coolPage(), oldSwip: nullptr, frame: 0000fff2156f0820
+WARNING:  Please file a bug report: Race detected in coolPage(), oldSwip: nullptr, frame: 0000fff215787ae0
+WARNING:  Please file a bug report: Race detected in coolPage(), oldSwip: nullptr, frame: 0000fff2157da4c0
+WARNING:  Please file a bug report: Race detected in coolPage(), oldSwip: nullptr, frame: 0000fff2156f8080
+WARNING:  Please file a bug report: Race detected in coolPage(), oldSwip: nullptr, frame: 0000fff2156fae40
+WARNING:  Please file a bug report: Race detected in coolPage(), oldSwip: nullptr, frame: 0000fff2156e4880
+WARNING:  Please file a bug report: Race detected in coolPage(), oldSwip: nullptr, frame: 0000fff2157ef9a0
+WARNING:  Please file a bug report: Race detected in coolPage(), oldSwip: nullptr, frame: 0000fff2156e86c0
+WARNING:  Please file a bug report: Race detected in coolPage(), oldSwip: nullptr, frame: 0000fff2156f8a40
+WARNING:  Please file a bug report: Race detected in coolPage(), oldSwip: nullptr, frame: 0000fff2157a6620
+WARNING:  Please file a bug report: Race detected in coolPage(), oldSwip: 0000000000000001, frame: 0000fff215323fe0
+WARNING:  Please file a bug report: Race detected in coolPage(), oldSwip: nullptr, frame: 0000fff2157014a0
+WARNING:  Please file a bug report: Race detected in coolPage(), oldSwip: nullptr, frame: 0000fff2156e50c0
+WARNING:  Please file a bug report: Race detected in coolPage(), oldSwip: nullptr, frame: 0000fff2157ddfa0
+WARNING:  Please file a bug report: Race detected in coolPage(), oldSwip: nullptr, frame: 0000fff21579f9c0
+WARNING:  Please file a bug report: Race detected in coolPage(), oldSwip: nullptr, frame: 0000fff2156e4dc0
+WARNING:  Please file a bug report: Race detected in coolPage(), oldSwip: nullptr, frame: 0000fff2156f5560
+WARNING:  Please file a bug report: Race detected in coolPage(), oldSwip: nullptr, frame: 0000fff2156e4d00
+WARNING:  Please file a bug report: Race detected in coolPage(), oldSwip: nullptr, frame: 0000fff2157de000
+WARNING:  Please file a bug report: Race detected in coolPage(), oldSwip: nullptr, frame: 0000fff2157002a0
+WARNING:  Please file a bug report: Race detected in coolPage(), oldSwip: nullptr, frame: 0000fff2156f5560
+WARNING:  Please file a bug report: Race detected in coolPage(), oldSwip: nullptr, frame: 0000fff2157da580
+WARNING:  Please file a bug report: Race detected in coolPage(), oldSwip: nullptr, frame: 0000fff2157df260
+WARNING:  Please file a bug report: Race detected in coolPage(), oldSwip: nullptr, frame: 0000fff2157014a0
+WARNING:  Please file a bug report: Race detected in coolPage(), oldSwip: nullptr, frame: 0000fff2157f3240
+WARNING:  Please file a bug report: Race detected in coolPage(), oldSwip: nullptr, frame: 0000fff2156e5120
+WARNING:  Please file a bug report: Race detected in coolPage(), oldSwip: nullptr, frame: 0000fff2156e5180
+WARNING:  Please file a bug report: Race detected in coolPage(), oldSwip: nullptr, frame: 0000fff215787ae0
+WARNING:  Please file a bug report: Race detected in coolPage(), oldSwip: nullptr, frame: 0000fff2157a2660
+WARNING:  Please file a bug report: Race detected in coolPage(), oldSwip: nullptr, frame: 0000fff2156e8480
+WARNING:  Please file a bug report: Race detected in coolPage(), oldSwip: nullptr, frame: 0000fff2156fd600
+WARNING:  Please file a bug report: Race detected in coolPage(), oldSwip: nullptr, frame: 0000fff2156eb240
+WARNING:  Please file a bug report: Race detected in coolPage(), oldSwip: nullptr, frame: 0000fff2157e3280
+WARNING:  Please file a bug report: Race detected in coolPage(), oldSwip: nullptr, frame: 0000fff2157ea900
+WARNING:  Please file a bug report: Race detected in coolPage(), oldSwip: nullptr, frame: 0000fff215792a60
+WARNING:  Please file a bug report: Race detected in coolPage(), oldSwip: nullptr, frame: 0000fff215795820
+WARNING:  Please file a bug report: Race detected in coolPage(), oldSwip: nullptr, frame: 0000fff2157e1a80
+WARNING:  Please file a bug report: Race detected in coolPage(), oldSwip: nullptr, frame: 0000fff2156f0700
+WARNING:  Please file a bug report: Race detected in coolPage(), oldSwip: nullptr, frame: 0000fff2156fe5c0
+WARNING:  Please file a bug report: Race detected in coolPage(), oldSwip: nullptr, frame: 0000fff2157a0860
+WARNING:  Please file a bug report: Race detected in coolPage(), oldSwip: nullptr, frame: 0000fff2157da3a0
+WARNING:  Please file a bug report: Race detected in coolPage(), oldSwip: nullptr, frame: 0000fff2157e7c00
+WARNING:  Please file a bug report: Race detected in coolPage(), oldSwip: nullptr, frame: 0000fff215702340
+WARNING:  Please file a bug report: Race detected in coolPage(), oldSwip: nullptr, frame: 0000fff21579cb40
+WARNING:  Please file a bug report: Race detected in coolPage(), oldSwip: nullptr, frame: 0000fff2156ff7c0
+WARNING:  Please file a bug report: Race detected in coolPage(), oldSwip: nullptr, frame: 0000fff215846f40
+WARNING:  Please file a bug report: Race detected in coolPage(), oldSwip: nullptr, frame: 0000fff2156fc340
+WARNING:  Please file a bug report: Race detected in coolPage(), oldSwip: nullptr, frame: 0000fff2157f4560
+WARNING:  Please file a bug report: Race detected in coolPage(), oldSwip: nullptr, frame: 0000fff2156e8000
+WARNING:  Please file a bug report: Race detected in coolPage(), oldSwip: nullptr, frame: 0000fff2157960c0
+WARNING:  Please file a bug report: Race detected in coolPage(), oldSwip: nullptr, frame: 0000fff2156f8200
+WARNING:  Please file a bug report: Race detected in coolPage(), oldSwip: nullptr, frame: 0000fff2157e7300
+WARNING:  Please file a bug report: Race detected in coolPage(), oldSwip: nullptr, frame: 0000fff2157f7f80
+WARNING:  Please file a bug report: Race detected in coolPage(), oldSwip: nullptr, frame: 0000fff2157ee200
+WARNING:  Please file a bug report: Race detected in coolPage(), oldSwip: nullptr, frame: 0000fff2156f0940
+WARNING:  Please file a bug report: Race detected in coolPage(), oldSwip: nullptr, frame: 0000fff2157a3e00
+WARNING:  Please file a bug report: Race detected in coolPage(), oldSwip: nullptr, frame: 0000fff2157e3220
+WARNING:  Please file a bug report: Race detected in coolPage(), oldSwip: nullptr, frame: 0000fff2156f1660
+ c_count | custdist 
+---------+----------
+       0 |   500021
+      10 |    66157
+       9 |    65243
+      11 |    62072
+       8 |    58350
+      12 |    55821
+      13 |    49811
+       7 |    46847
+      19 |    46641
+      18 |    46259
+      14 |    45226
+      17 |    45186
+      20 |    45154
+      16 |    43908
+      15 |    43818
+      21 |    42360
+      22 |    37945
+       6 |    32771
+      23 |    32679
+      24 |    26658
+      25 |    21098
+       5 |    19709
+      26 |    15895
+      27 |    11695
+       4 |     9922
+      28 |     8221
+      29 |     5599
+       3 |     4063
+      30 |     3679
+      31 |     2327
+      32 |     1500
+       2 |     1206
+      33 |      854
+      34 |      506
+      35 |      248
+       1 |      233
+      36 |      155
+      37 |       73
+      38 |       47
+      39 |       19
+      40 |       12
+      42 |        4
+      41 |        4
+      44 |        2
+      45 |        1
+      43 |        1
+(46 rows)
+
+Time: 2364.579 ms (00:02.365)
