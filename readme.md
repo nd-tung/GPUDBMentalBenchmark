@@ -10,6 +10,8 @@ GPU-accelerated database operations using Apple Metal vs DuckDB vs CedarDB compa
 **Methodology**: Warm cache (data pre-loaded), execution time only
 
 ### GPU Metal Results (Timestamp: 20251225_190157)
+<img width="3600" height="1800" alt="sf1_comparison" src="https://github.com/user-attachments/assets/cc16778e-95b4-49ae-9237-21c6de63154b" />
+<img width="3600" height="1800" alt="sf10_comparison" src="https://github.com/user-attachments/assets/657ab6d8-ad19-4894-8bac-8c2055f86292" />
 
 #### SF-1 Dataset (6M lineitem rows)
 | Query | GPU Time (ms) | CPU Time (ms) | Wall Clock (ms) |
