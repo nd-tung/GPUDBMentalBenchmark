@@ -26,11 +26,12 @@ kernel void sum_kernel_stage1(const device float* inData,
                               constant uint& dataSize, 
                               uint group_id [[threadgroup_position_in_grid]],
                               uint thread_id_in_group [[thread_index_in_threadgroup]],
-                              uint threads_per_group [[threads_per_threadgroup]])
+                              uint threads_per_group [[threads_per_threadgroup]],
+                              uint grid_size [[threads_per_grid]])
 {
     // 1. Each thread computes a local sum
     float local_sum = 0.0f;
-    uint grid_size = threads_per_group * 2048; // Total threads in the grid
+    // uint grid_size = threads_per_group * 2048; // Total threads in the grid
     for (uint index = (group_id * threads_per_group) + thread_id_in_group;
               index < dataSize;
               index += grid_size) {
@@ -679,7 +680,8 @@ kernel void q1_bins_accumulate_int_stage1(
     constant uint& num_threadgroups,
     uint group_id [[threadgroup_position_in_grid]],
     uint thread_id_in_group [[thread_index_in_threadgroup]],
-    uint threads_per_group [[threads_per_threadgroup]])
+    uint threads_per_group [[threads_per_threadgroup]],
+    uint grid_size [[threads_per_grid]])
 {
     const int BINS = 6;
     // Per-thread local accumulators in integer units
@@ -692,7 +694,7 @@ kernel void q1_bins_accumulate_int_stage1(
     for (int b = 0; b < BINS; ++b) { sum_qty_c[b]=0; sum_base_c[b]=0; sum_disc_c[b]=0; sum_charge_c[b]=0; sum_disc_bp[b]=0u; cnt[b]=0u; }
 
     // Grid stride loop using actual dispatched num_threadgroups
-    uint grid_size = threads_per_group * num_threadgroups;
+    // uint grid_size = threads_per_group * num_threadgroups;
     for (uint i = (group_id * threads_per_group) + thread_id_in_group; i < data_size; i += grid_size) {
         // [SEL] Selection: filter rows by shipdate and bin by (returnflag, linestatus)
         if (l_shipdate[i] > cutoff_date) continue;
@@ -962,11 +964,12 @@ kernel void q6_filter_and_sum_stage1(
     constant float& max_quantity,        // 24.0
     uint group_id [[threadgroup_position_in_grid]],
     uint thread_id_in_group [[thread_index_in_threadgroup]],
-    uint threads_per_group [[threads_per_threadgroup]])
+    uint threads_per_group [[threads_per_threadgroup]],
+    uint grid_size [[threads_per_grid]])
 {
     // 1. Each thread computes a local revenue sum
     float local_revenue = 0.0f;
-    uint grid_size = threads_per_group * 2048; // Total threads in the grid
+    // uint grid_size = threads_per_group * 2048; // Total threads in the grid
     
     for (uint index = (group_id * threads_per_group) + thread_id_in_group;
          index < data_size;
@@ -1312,9 +1315,10 @@ kernel void q3_probe_and_local_agg_kernel(
     constant uint& out_capacity,
     uint group_id [[threadgroup_position_in_grid]],
     uint thread_id_in_group [[thread_index_in_threadgroup]],
-    uint threads_per_group [[threads_per_threadgroup]])
+    uint threads_per_group [[threads_per_threadgroup]],
+    uint grid_size [[threads_per_grid]])
 {
-    uint grid_size = threads_per_group * 2048; // Matches host dispatch
+    // uint grid_size = threads_per_group * 2048; // Matches host dispatch
     uint global_id = (group_id * threads_per_group) + thread_id_in_group;
 
     // ILP Batch Size
@@ -1384,7 +1388,7 @@ kernel void q3_probe_and_local_agg_kernel(
             }
         }
 
-        // Final Aggregation
+        // Materialize results (Compute Revenue & Append)
         for (int k = 0; k < BATCH_SIZE; k++) {
             if (pass_customer[k]) {
                 float revenue = l_extendedprice[idx[k]] * (1.0f - l_discount[idx[k]]);
@@ -1626,7 +1630,8 @@ kernel void q9_probe_and_local_agg_kernel(
     // Thread IDs
     uint group_id [[threadgroup_position_in_grid]],
     uint thread_id_in_group [[thread_index_in_threadgroup]],
-    uint threads_per_group [[threads_per_threadgroup]])
+    uint threads_per_group [[threads_per_threadgroup]],
+    uint grid_size [[threads_per_grid]])
 {
     const int local_ht_size = 256;
     threadgroup Q9Aggregates_Local local_ht[local_ht_size];
@@ -1637,7 +1642,7 @@ kernel void q9_probe_and_local_agg_kernel(
     }
     threadgroup_barrier(mem_flags::mem_threadgroup);
 
-    const uint grid_size = threads_per_group * 2048;
+    // const uint grid_size = threads_per_group * 2048;
     const uint global_tid = (group_id * threads_per_group) + thread_id_in_group;
     const uint BATCH = 4;
     const uint stride = grid_size * BATCH;
@@ -1848,10 +1853,11 @@ kernel void q13_fused_direct_count_kernel(
     constant uint& customer_size,
     uint group_id [[threadgroup_position_in_grid]],
     uint thread_id_in_group [[thread_index_in_threadgroup]],
-    uint threads_per_group [[threads_per_threadgroup]])
+    uint threads_per_group [[threads_per_threadgroup]],
+    uint grid_size [[threads_per_grid]])
 {
     const int comment_len = 100;
-    const uint grid_size = threads_per_group * 2048;
+    // const uint grid_size = threads_per_group * 2048;
     const uint global_tid = (group_id * threads_per_group) + thread_id_in_group;
     const uint BATCH = 4;
     const uint stride = grid_size * BATCH;
@@ -1932,10 +1938,11 @@ kernel void q13_local_count_kernel(
     constant uint& orders_size,
     uint group_id [[threadgroup_position_in_grid]],
     uint thread_id_in_group [[thread_index_in_threadgroup]],
-    uint threads_per_group [[threads_per_threadgroup]])
+    uint threads_per_group [[threads_per_threadgroup]],
+    uint grid_size [[threads_per_grid]])
 {
     const int comment_len = 100;
-    const uint grid_size = threads_per_group * 2048;
+    // const uint grid_size = threads_per_group * 2048;
     const uint global_tid = (group_id * threads_per_group) + thread_id_in_group;
     const uint BATCH = 4;
     const uint stride = grid_size * BATCH;
