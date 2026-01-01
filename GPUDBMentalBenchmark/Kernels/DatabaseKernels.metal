@@ -31,28 +31,49 @@ kernel void sum_kernel_stage1(const device float* inData,
 {
     // 1. Each thread computes a local sum
     float local_sum = 0.0f;
-    // uint grid_size = threads_per_group * 2048; // Total threads in the grid
     for (uint index = (group_id * threads_per_group) + thread_id_in_group;
               index < dataSize;
               index += grid_size) {
         local_sum += inData[index];
     }
     
-    // 2. Reduce within the threadgroup using shared memory. (This part was already correct)
-    threadgroup float shared_memory[1024];
-    shared_memory[thread_id_in_group] = local_sum;
+    // 2. SIMD-level reduction
+    // Sum across the SIMD group (32 threads)
+    float simd_group_sum = simd_sum(local_sum);
+
+    // 3. Threadgroup-level reduction using shared memory
+    // We only need to store the result of each SIMD group.
+    // Max threads per group is 1024, SIMD width is 32 -> max 32 entries needed.
+    threadgroup float shared_memory[32];
+
+    uint simd_lane_id = thread_id_in_group % 32; // Index within SIMD group
+    uint simd_group_id = thread_id_in_group / 32; // Index of the SIMD group
+
+    // Only the first thread of each SIMD group writes to shared memory
+    if (simd_lane_id == 0) {
+        shared_memory[simd_group_id] = simd_group_sum;
+    }
+    
     threadgroup_barrier(mem_flags::mem_threadgroup);
 
-    for (uint stride = threads_per_group / 2; stride > 0; stride /= 2) {
-        if (thread_id_in_group < stride) {
-            shared_memory[thread_id_in_group] += shared_memory[thread_id_in_group + stride];
+    // 4. Final reduction by the first SIMD group
+    // The first SIMD group (threads 0-31) sums up the partial results from shared memory.
+    if (simd_group_id == 0) {
+        float final_group_sum = 0.0f;
+        uint num_simd_groups = (threads_per_group + 31) / 32;
+        
+        // Load the partial sum for this lane, if it corresponds to a valid SIMD group
+        if (simd_lane_id < num_simd_groups) {
+            final_group_sum = shared_memory[simd_lane_id];
         }
-        threadgroup_barrier(mem_flags::mem_threadgroup);
-    }
-
-    // 3. The first thread in each group writes the final partial sum.
-    if (thread_id_in_group == 0) {
-        partialSums[group_id] = shared_memory[0];
+        
+        // Reduce these values again using simd_sum
+        final_group_sum = simd_sum(final_group_sum);
+        
+        // The first thread of the first SIMD group writes the result
+        if (simd_lane_id == 0) {
+            partialSums[group_id] = final_group_sum;
+        }
     }
 }
 
@@ -656,6 +677,19 @@ kernel void q1_bins_accumulate_kernel(
 }
 #endif // q1_bins_accumulate_kernel
 
+// Helper for 64-bit integer SIMD sum
+inline long simd_sum_long(long val) {
+    for (int offset = 16; offset > 0; offset /= 2) {
+        int lower = (int)(val & 0xFFFFFFFF);
+        int upper = (int)((val >> 32) & 0xFFFFFFFF);
+        int other_lower = simd_shuffle_xor(lower, offset);
+        int other_upper = simd_shuffle_xor(upper, offset);
+        long other = ((long)other_upper << 32) | (uint)other_lower;
+        val += other;
+    }
+    return val;
+}
+
 // --- Q1 Integer-cent two-pass path ---
 // Stage 1: Per-thread local accumulation into 6 bins using integer cents (and basis points),
 // then threadgroup reduction to one partial per bin per threadgroup. No atomics used.
@@ -727,125 +761,94 @@ kernel void q1_bins_accumulate_int_stage1(
     }
 
     // Threadgroup reduction: reuse a single shared array for 64-bit and 32-bit reductions
-    threadgroup long tg64[1024];
-    threadgroup uint tg32[1024];
+    // We only need enough space for one value per SIMD group (max 32 for 1024 threads)
+    threadgroup long tg64[32];
+    threadgroup uint tg32[32];
 
-    // [AGG-LOCAL] Threadgroup reduction for each bin and metric (power-of-two fold + tail handling)
-    // For each bin, reduce each metric across threads, then write one partial per bin
+    // SIMD helper variables
+    uint simd_lane_id = thread_id_in_group % 32;
+    uint simd_group_id = thread_id_in_group / 32;
+    uint num_simd_groups = (threads_per_group + 31) / 32;
+
+    // [AGG-LOCAL] Threadgroup reduction for each bin and metric using SIMD primitives
     for (int b = 0; b < BINS; ++b) {
-        // qty_cents (int64)
-        tg64[thread_id_in_group] = sum_qty_c[b];
+        // 1. qty_cents (int64)
+        long val = sum_qty_c[b];
+        long simd_sum_val = simd_sum_long(val);
+        if (simd_lane_id == 0) tg64[simd_group_id] = simd_sum_val;
         threadgroup_barrier(mem_flags::mem_threadgroup);
-        {
-            uint n = threads_per_group;
-            uint p2 = 1u << (31 - clz(n));  // largest power of 2 <= n
-            uint tail = n - p2;             // remainder elements
-            if (thread_id_in_group < tail) {
-                tg64[thread_id_in_group] += tg64[thread_id_in_group + p2];
-            }
-            threadgroup_barrier(mem_flags::mem_threadgroup);
-            for (uint stride = p2 / 2; stride > 0; stride /= 2) {
-                if (thread_id_in_group < stride) tg64[thread_id_in_group] += tg64[thread_id_in_group + stride];
-                threadgroup_barrier(mem_flags::mem_threadgroup);
-            }
-            if (thread_id_in_group == 0) { p_sum_qty_cents[group_id * BINS + b] = tg64[0]; }
-            threadgroup_barrier(mem_flags::mem_threadgroup);
+        
+        if (simd_group_id == 0) {
+            long final_sum = (simd_lane_id < num_simd_groups) ? tg64[simd_lane_id] : 0;
+            final_sum = simd_sum_long(final_sum);
+            if (simd_lane_id == 0) p_sum_qty_cents[group_id * BINS + b] = final_sum;
         }
+        threadgroup_barrier(mem_flags::mem_threadgroup);
 
-        // base_cents
-        tg64[thread_id_in_group] = sum_base_c[b];
+        // 2. base_cents (int64)
+        val = sum_base_c[b];
+        simd_sum_val = simd_sum_long(val);
+        if (simd_lane_id == 0) tg64[simd_group_id] = simd_sum_val;
         threadgroup_barrier(mem_flags::mem_threadgroup);
-        {
-            uint n = threads_per_group;
-            uint p2 = 1u << (31 - clz(n));
-            uint tail = n - p2;
-            if (thread_id_in_group < tail) {
-                tg64[thread_id_in_group] += tg64[thread_id_in_group + p2];
-            }
-            threadgroup_barrier(mem_flags::mem_threadgroup);
-            for (uint stride = p2 / 2; stride > 0; stride /= 2) {
-                if (thread_id_in_group < stride) tg64[thread_id_in_group] += tg64[thread_id_in_group + stride];
-                threadgroup_barrier(mem_flags::mem_threadgroup);
-            }
-            if (thread_id_in_group == 0) { p_sum_base_cents[group_id * BINS + b] = tg64[0]; }
-            threadgroup_barrier(mem_flags::mem_threadgroup);
+        
+        if (simd_group_id == 0) {
+            long final_sum = (simd_lane_id < num_simd_groups) ? tg64[simd_lane_id] : 0;
+            final_sum = simd_sum_long(final_sum);
+            if (simd_lane_id == 0) p_sum_base_cents[group_id * BINS + b] = final_sum;
         }
+        threadgroup_barrier(mem_flags::mem_threadgroup);
 
-        // disc_price_cents
-        tg64[thread_id_in_group] = sum_disc_c[b];
+        // 3. disc_price_cents (int64)
+        val = sum_disc_c[b];
+        simd_sum_val = simd_sum_long(val);
+        if (simd_lane_id == 0) tg64[simd_group_id] = simd_sum_val;
         threadgroup_barrier(mem_flags::mem_threadgroup);
-        {
-            uint n = threads_per_group;
-            uint p2 = 1u << (31 - clz(n));
-            uint tail = n - p2;
-            if (thread_id_in_group < tail) {
-                tg64[thread_id_in_group] += tg64[thread_id_in_group + p2];
-            }
-            threadgroup_barrier(mem_flags::mem_threadgroup);
-            for (uint stride = p2 / 2; stride > 0; stride /= 2) {
-                if (thread_id_in_group < stride) tg64[thread_id_in_group] += tg64[thread_id_in_group + stride];
-                threadgroup_barrier(mem_flags::mem_threadgroup);
-            }
-            if (thread_id_in_group == 0) { p_sum_disc_price_cents[group_id * BINS + b] = tg64[0]; }
-            threadgroup_barrier(mem_flags::mem_threadgroup);
+        
+        if (simd_group_id == 0) {
+            long final_sum = (simd_lane_id < num_simd_groups) ? tg64[simd_lane_id] : 0;
+            final_sum = simd_sum_long(final_sum);
+            if (simd_lane_id == 0) p_sum_disc_price_cents[group_id * BINS + b] = final_sum;
         }
+        threadgroup_barrier(mem_flags::mem_threadgroup);
 
-        // charge_cents
-        tg64[thread_id_in_group] = sum_charge_c[b];
+        // 4. charge_cents (int64)
+        val = sum_charge_c[b];
+        simd_sum_val = simd_sum_long(val);
+        if (simd_lane_id == 0) tg64[simd_group_id] = simd_sum_val;
         threadgroup_barrier(mem_flags::mem_threadgroup);
-        {
-            uint n = threads_per_group;
-            uint p2 = 1u << (31 - clz(n));
-            uint tail = n - p2;
-            if (thread_id_in_group < tail) {
-                tg64[thread_id_in_group] += tg64[thread_id_in_group + p2];
-            }
-            threadgroup_barrier(mem_flags::mem_threadgroup);
-            for (uint stride = p2 / 2; stride > 0; stride /= 2) {
-                if (thread_id_in_group < stride) tg64[thread_id_in_group] += tg64[thread_id_in_group + stride];
-                threadgroup_barrier(mem_flags::mem_threadgroup);
-            }
-            if (thread_id_in_group == 0) { p_sum_charge_cents[group_id * BINS + b] = tg64[0]; }
-            threadgroup_barrier(mem_flags::mem_threadgroup);
+        
+        if (simd_group_id == 0) {
+            long final_sum = (simd_lane_id < num_simd_groups) ? tg64[simd_lane_id] : 0;
+            final_sum = simd_sum_long(final_sum);
+            if (simd_lane_id == 0) p_sum_charge_cents[group_id * BINS + b] = final_sum;
         }
+        threadgroup_barrier(mem_flags::mem_threadgroup);
 
-        // sum_discount_bp
-        tg32[thread_id_in_group] = sum_disc_bp[b];
+        // 5. sum_discount_bp (uint32)
+        uint uval = sum_disc_bp[b];
+        uint simd_sum_uval = simd_sum(uval);
+        if (simd_lane_id == 0) tg32[simd_group_id] = simd_sum_uval;
         threadgroup_barrier(mem_flags::mem_threadgroup);
-        {
-            uint n = threads_per_group;
-            uint p2 = 1u << (31 - clz(n));
-            uint tail = n - p2;
-            if (thread_id_in_group < tail) {
-                tg32[thread_id_in_group] += tg32[thread_id_in_group + p2];
-            }
-            threadgroup_barrier(mem_flags::mem_threadgroup);
-            for (uint stride = p2 / 2; stride > 0; stride /= 2) {
-                if (thread_id_in_group < stride) tg32[thread_id_in_group] += tg32[thread_id_in_group + stride];
-                threadgroup_barrier(mem_flags::mem_threadgroup);
-            }
-            if (thread_id_in_group == 0) { p_sum_discount_bp[group_id * BINS + b] = tg32[0]; }
-            threadgroup_barrier(mem_flags::mem_threadgroup);
+        
+        if (simd_group_id == 0) {
+            uint final_sum = (simd_lane_id < num_simd_groups) ? tg32[simd_lane_id] : 0;
+            final_sum = simd_sum(final_sum);
+            if (simd_lane_id == 0) p_sum_discount_bp[group_id * BINS + b] = final_sum;
         }
+        threadgroup_barrier(mem_flags::mem_threadgroup);
 
-        // count
-        tg32[thread_id_in_group] = cnt[b];
+        // 6. count (uint32)
+        uval = cnt[b];
+        simd_sum_uval = simd_sum(uval);
+        if (simd_lane_id == 0) tg32[simd_group_id] = simd_sum_uval;
         threadgroup_barrier(mem_flags::mem_threadgroup);
-        {
-            uint n = threads_per_group;
-            uint p2 = 1u << (31 - clz(n));
-            uint tail = n - p2;
-            if (thread_id_in_group < tail) {
-                tg32[thread_id_in_group] += tg32[thread_id_in_group + p2];
-            }
-            threadgroup_barrier(mem_flags::mem_threadgroup);
-            for (uint stride = p2 / 2; stride > 0; stride /= 2) {
-                if (thread_id_in_group < stride) tg32[thread_id_in_group] += tg32[thread_id_in_group + stride];
-                threadgroup_barrier(mem_flags::mem_threadgroup);
-            }
-            if (thread_id_in_group == 0) { p_count[group_id * BINS + b] = tg32[0]; }
-            threadgroup_barrier(mem_flags::mem_threadgroup);
+        
+        if (simd_group_id == 0) {
+            uint final_sum = (simd_lane_id < num_simd_groups) ? tg32[simd_lane_id] : 0;
+            final_sum = simd_sum(final_sum);
+            if (simd_lane_id == 0) p_count[group_id * BINS + b] = final_sum;
         }
+        threadgroup_barrier(mem_flags::mem_threadgroup);
     }
 }
 
@@ -987,35 +990,54 @@ kernel void q6_filter_and_sum_stage1(
         }
     }
     
-    // 2. Reduce within the threadgroup using shared memory
-    threadgroup float shared_memory[1024];
-    shared_memory[thread_id_in_group] = local_revenue;
+    // 2. SIMD reduction
+    float simd_val = simd_sum(local_revenue);
+
+    // 3. Threadgroup reduction using SIMD groups
+    // Max 32 SIMD groups per threadgroup (1024 / 32)
+    threadgroup float shared_memory[32];
+    
+    uint simd_lane_id = thread_id_in_group % 32;
+    uint simd_group_id = thread_id_in_group / 32;
+
+    // First thread of each SIMD group writes to shared memory
+    if (simd_lane_id == 0) {
+        shared_memory[simd_group_id] = simd_val;
+    }
     threadgroup_barrier(mem_flags::mem_threadgroup);
 
-    // Perform reduction within threadgroup
-    for (uint stride = threads_per_group / 2; stride > 0; stride /= 2) {
-        if (thread_id_in_group < stride) {
-            shared_memory[thread_id_in_group] += shared_memory[thread_id_in_group + stride];
+    // 4. Final reduction by the first SIMD group
+    if (simd_group_id == 0) {
+        uint num_simd_groups = (threads_per_group + 31) / 32;
+        float final_val = (simd_lane_id < num_simd_groups) ? shared_memory[simd_lane_id] : 0.0f;
+        final_val = simd_sum(final_val);
+        
+        if (simd_lane_id == 0) {
+            partial_revenues[group_id] = final_val;
         }
-        threadgroup_barrier(mem_flags::mem_threadgroup);
-    }
-
-    // 3. The first thread in each group writes the partial revenue sum
-    if (thread_id_in_group == 0) {
-        partial_revenues[group_id] = shared_memory[0];
     }
 }
 
-// Stage 2: Reduce partial revenue sums to final result
+    // Stage 2: Reduce partial revenue sums to final result
 kernel void q6_final_sum_stage2(
     const device float* partial_revenues,
     device float* final_revenue,
-    uint index [[thread_position_in_grid]])
+    uint index [[thread_position_in_grid]],
+    uint thread_id_in_group [[thread_index_in_threadgroup]],
+    uint threads_per_group [[threads_per_threadgroup]])
 {
-    // A single thread sums all partial revenues to get final result
+    // Use SIMD reduction for the final stage as well
+    // Assuming we launch with enough threads to cover the partials (e.g. 1 threadgroup of 1024 threads)
+    // But the original code launched 1 thread. Let's stick to the original logic but optimized if possible.
+    // Actually, the original code loop over 2048 items with 1 thread.
+    // We can parallelize this.
+    
+    // However, to keep it simple and compatible with the single-thread dispatch in main.cpp:
     if (index == 0) {
         float total_revenue = 0.0f;
         // Sum all partial revenues from stage 1 (2048 threadgroups)
+        // We can use SIMD here if we dispatched a SIMD group, but with 1 thread it's scalar.
+        // Let's leave this scalar for now as it's very small (2048 iters).
         for (int i = 0; i < 2048; ++i) {
             total_revenue += partial_revenues[i];
         }
@@ -1320,6 +1342,7 @@ kernel void q3_probe_and_local_agg_kernel(
 {
     // uint grid_size = threads_per_group * 2048; // Matches host dispatch
     uint global_id = (group_id * threads_per_group) + thread_id_in_group;
+    uint simd_lane_id = thread_id_in_group % 32; // Need this for SIMD logic
 
     // ILP Batch Size
     const int BATCH_SIZE = 4;
@@ -1389,18 +1412,45 @@ kernel void q3_probe_and_local_agg_kernel(
         }
 
         // Materialize results (Compute Revenue & Append)
+        // Optimization: Use SIMD to aggregate allocation of output slots
+        
+        // We process one item from the batch at a time across the SIMD group to keep it simple
         for (int k = 0; k < BATCH_SIZE; k++) {
-            if (pass_customer[k]) {
-                float revenue = l_extendedprice[idx[k]] * (1.0f - l_discount[idx[k]]);
+            bool active = pass_customer[k];
+            
+            // 2. Count how many threads in the SIMD group have a match
+            // simd_ballot returns a simd_vote object, cast to ulong to get the bitmask
+            ulong active_ballot = (ulong)simd_ballot(active);
+            uint active_count = popcount(active_ballot);
+            
+            if (active_count > 0) {
+                // 3. Calculate offset for this thread within the allocated block
+                // simd_prefix_exclusive_sum returns the sum of values in lower lanes
+                uint local_offset = simd_prefix_exclusive_sum(active ? 1u : 0u);
                 
-                uint out_idx = atomic_fetch_add_explicit(out_count, 1u, memory_order_relaxed);
-                if (out_idx < out_capacity) {
-                    Q3Aggregates_Local r;
-                    r.key = l_orderkey_val[k];
-                    r.revenue = revenue;
-                    r.orderdate = (uint)o_orderdate[orders_idx[k]];
-                    r.shippriority = (uint)o_shippriority[orders_idx[k]];
-                    out_results[out_idx] = r;
+                uint base_offset = 0;
+                // 4. Leader allocates space for the whole group
+                // The leader is the thread with the lowest index that is active.
+                // We can find it using ctz (count trailing zeros) on the ballot.
+                ushort leader_lane = ctz(active_ballot);
+                
+                if (simd_lane_id == leader_lane) { 
+                     base_offset = atomic_fetch_add_explicit(out_count, active_count, memory_order_relaxed);
+                }
+                
+                // Broadcast base_offset from the leader to all active lanes
+                base_offset = simd_broadcast(base_offset, leader_lane);
+                
+                if (active) {
+                    uint out_idx = base_offset + local_offset;
+                    if (out_idx < out_capacity) {
+                        Q3Aggregates_Local r;
+                        r.key = l_orderkey_val[k];
+                        r.revenue = l_extendedprice[idx[k]] * (1.0f - l_discount[idx[k]]);
+                        r.orderdate = (uint)o_orderdate[orders_idx[k]];
+                        r.shippriority = (uint)o_shippriority[orders_idx[k]];
+                        out_results[out_idx] = r;
+                    }
                 }
             }
         }
