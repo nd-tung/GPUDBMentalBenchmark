@@ -1,12 +1,12 @@
-# GPU Database Mental Benchmark Makefile
+# GPU Database Metal Benchmark Makefile
 # Builds C++ project using metal-cpp library
 
 # Project Configuration
-PROJECT_NAME = GPUDBMentalBenchmark
-SOURCE_DIR = GPUDBMentalBenchmark/Sourse
-KERNEL_DIR = GPUDBMentalBenchmark/Kernels
-METAL_CPP_DIR = GPUDBMentalBenchmark/metal-cpp
-DATA_DIR = GPUDBMentalBenchmark/Data
+PROJECT_NAME = GPUDBMetalBenchmark
+SOURCE_DIR = GPUDBMetalBenchmark/Source
+KERNEL_DIR = GPUDBMetalBenchmark/Kernels
+METAL_CPP_DIR = GPUDBMetalBenchmark/metal-cpp
+DATA_DIR = GPUDBMetalBenchmark/Data
 BUILD_DIR = build
 BIN_DIR = $(BUILD_DIR)/bin
 OBJ_DIR = $(BUILD_DIR)/obj
@@ -55,7 +55,7 @@ $(KERNEL_METALLIB): $(KERNEL_AIR)
 	@echo "Linking Metal library (.metallib)..."
 	$(METALLIB) $(KERNEL_AIR) -o $(KERNEL_METALLIB)
 	@# Copy to runtime location so device->newLibrary("default.metallib") finds the latest
-	cp $(KERNEL_METALLIB) GPUDBMentalBenchmark/default.metallib
+	cp $(KERNEL_METALLIB) GPUDBMetalBenchmark/default.metallib
 	cp $(KERNEL_METALLIB) default.metallib
 
 # Compile source files
@@ -99,50 +99,50 @@ uninstall:
 .PHONY: run
 run: $(TARGET) $(KERNEL_METALLIB)
 	@echo "Running $(PROJECT_NAME)..."
-	@cd GPUDBMentalBenchmark && ../$(TARGET)
+	@cd GPUDBMetalBenchmark && ../$(TARGET)
 
 # Run with different datasets
 .PHONY: run-sf1
 run-sf1: $(TARGET) $(KERNEL_METALLIB)
 	@echo "Running $(PROJECT_NAME) with SF-1 dataset..."
-	@cd GPUDBMentalBenchmark && ../$(TARGET) sf1
+	@cd GPUDBMetalBenchmark && ../$(TARGET) sf1
 
 .PHONY: run-sf10
 run-sf10: $(TARGET) $(KERNEL_METALLIB)
 	@echo "Running $(PROJECT_NAME) with SF-10 dataset..."
-	@cd GPUDBMentalBenchmark && ../$(TARGET) sf10
+	@cd GPUDBMetalBenchmark && ../$(TARGET) sf10
 
 # Run TPC-H Query benchmarks individually
 .PHONY: run-q1
 run-q1: $(TARGET) $(KERNEL_METALLIB)
 	@echo "Running TPC-H Query 1 benchmark..."
-	@cd GPUDBMentalBenchmark && ../$(TARGET) q1
+	@cd GPUDBMetalBenchmark && ../$(TARGET) q1
 
 .PHONY: run-q3
 run-q3: $(TARGET) $(KERNEL_METALLIB)
 	@echo "Running TPC-H Query 3 benchmark..."
-	@cd GPUDBMentalBenchmark && ../$(TARGET) q3
+	@cd GPUDBMetalBenchmark && ../$(TARGET) q3
 
 .PHONY: run-q6
 run-q6: $(TARGET) $(KERNEL_METALLIB)
 	@echo "Running TPC-H Query 6 benchmark..."
-	@cd GPUDBMentalBenchmark && ../$(TARGET) q6
+	@cd GPUDBMetalBenchmark && ../$(TARGET) q6
 
 .PHONY: run-q9
 run-q9: $(TARGET) $(KERNEL_METALLIB)
 	@echo "Running TPC-H Query 9 benchmark..."
-	@cd GPUDBMentalBenchmark && ../$(TARGET) q9
+	@cd GPUDBMetalBenchmark && ../$(TARGET) q9
 
 .PHONY: run-q13
 run-q13: $(TARGET) $(KERNEL_METALLIB)
 	@echo "Running TPC-H Query 13 benchmark..."
-	@cd GPUDBMentalBenchmark && ../$(TARGET) q13
+	@cd GPUDBMetalBenchmark && ../$(TARGET) q13
 
 # Run all TPC-H queries
 .PHONY: run-all-queries
 run-all-queries: $(TARGET) $(KERNEL_METALLIB)
 	@echo "Running all TPC-H Query benchmarks..."
-	@cd GPUDBMentalBenchmark && ../$(TARGET)
+	@cd GPUDBMetalBenchmark && ../$(TARGET)
 
 # Check if required files exist
 .PHONY: check

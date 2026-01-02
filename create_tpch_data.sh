@@ -1,6 +1,6 @@
 #!/bin/bash
 
-# TPC-H Data Generation Script for GPU Database Mental Benchmark
+# TPC-H Data Generation Script for GPU Database Metal Benchmark
 # This script downloads, compiles, and runs the TPC-H dbgen tool to generate benchmark data
 
 set -e  # Exit on any error
@@ -8,7 +8,7 @@ set -e  # Exit on any error
 # Configuration
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_DIR="$SCRIPT_DIR"
-DATA_DIR="$PROJECT_DIR/GPUDBMentalBenchmark/Data"
+DATA_DIR="$PROJECT_DIR/GPUDBMetalBenchmark/Data"
 TEMP_DIR="$PROJECT_DIR/temp_tpch"
 DBGEN_URL="https://github.com/electrum/tpch-dbgen.git"
 

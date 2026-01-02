@@ -16,9 +16,9 @@
             <BuildableReference
                BuildableIdentifier = "primary"
                BlueprintIdentifier = "9365022D2E995B5D0018DCB2"
-               BuildableName = "GPUDBMentalBenchmark"
-               BlueprintName = "GPUDBMentalBenchmark"
-               ReferencedContainer = "container:GPUDBMentalBenchmark.xcodeproj">
+               BuildableName = "GPUDBMetalBenchmark"
+               BlueprintName = "GPUDBMetalBenchmark"
+               ReferencedContainer = "container:GPUDBMetalBenchmark.xcodeproj">
             </BuildableReference>
          </BuildActionEntry>
       </BuildActionEntries>
@@ -36,7 +36,7 @@
       selectedLauncherIdentifier = "Xcode.DebuggerFoundation.Launcher.LLDB"
       launchStyle = "0"
       useCustomWorkingDirectory = "YES"
-      customWorkingDirectory = "/Users/tea/Documents/GPUDBMentalBenchmark/GPUDBMentalBenchmark"
+      customWorkingDirectory = "/Users/tea/Documents/GPUDBMetalBenchmark/GPUDBMetalBenchmark"
       ignoresPersistentStateOnLaunch = "NO"
       debugDocumentVersioning = "YES"
       debugServiceExtension = "internal"
@@ -47,9 +47,9 @@
          <BuildableReference
             BuildableIdentifier = "primary"
             BlueprintIdentifier = "9365022D2E995B5D0018DCB2"
-            BuildableName = "GPUDBMentalBenchmark"
-            BlueprintName = "GPUDBMentalBenchmark"
-            ReferencedContainer = "container:GPUDBMentalBenchmark.xcodeproj">
+            BuildableName = "GPUDBMetalBenchmark"
+            BlueprintName = "GPUDBMetalBenchmark"
+            ReferencedContainer = "container:GPUDBMetalBenchmark.xcodeproj">
          </BuildableReference>
       </BuildableProductRunnable>
    </LaunchAction>
@@ -64,9 +64,9 @@
          <BuildableReference
             BuildableIdentifier = "primary"
             BlueprintIdentifier = "9365022D2E995B5D0018DCB2"
-            BuildableName = "GPUDBMentalBenchmark"
-            BlueprintName = "GPUDBMentalBenchmark"
-            ReferencedContainer = "container:GPUDBMentalBenchmark.xcodeproj">
+            BuildableName = "GPUDBMetalBenchmark"
+            BlueprintName = "GPUDBMetalBenchmark"
+            ReferencedContainer = "container:GPUDBMetalBenchmark.xcodeproj">
          </BuildableReference>
       </BuildableProductRunnable>
    </ProfileAction>

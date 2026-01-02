@@ -16,7 +16,7 @@
 #include "GroupByExecutor.hpp"
 #include "ExprEval.hpp"
 
-static std::string g_dataset_path = "GPUDBMentalBenchmark/Data/SF-1/";
+static std::string g_dataset_path = "GPUDBMetalBenchmark/Data/SF-1/";
 
 static std::vector<float> loadFloatColumn(const std::string& filePath, int columnIndex) {
     std::vector<float> data;
@@ -370,8 +370,8 @@ int main(int argc, const char* argv[]) {
     // Args: sf1|sf10 and optional --sql "..." or just SQL as first arg
     for (int i = 1; i < argc; ++i) {
         std::string arg = argv[i];
-        if (arg == "sf1") g_dataset_path = "GPUDBMentalBenchmark/Data/SF-1/";
-        else if (arg == "sf10") g_dataset_path = "GPUDBMentalBenchmark/Data/SF-10/";
+        if (arg == "sf1") g_dataset_path = "GPUDBMetalBenchmark/Data/SF-1/";
+        else if (arg == "sf10") g_dataset_path = "GPUDBMetalBenchmark/Data/SF-10/";
         else if (arg == "--sql" && i+1 < argc) { sql = argv[++i]; }
         else if (arg == "help" || arg == "--help" || arg == "-h") {
             std::cout << "GPUDBEngineHost" << std::endl;

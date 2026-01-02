@@ -30,14 +30,14 @@
 		9329C8932E99AC5B00E6EC56 /* readme.md */ = {isa = PBXFileReference; lastKnownFileType = net.daringfireball.markdown; path = readme.md; sourceTree = "<group>"; };
 		934F78C32E9D3087009F43BF /* QuartzCore.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = QuartzCore.framework; path = System/Library/Frameworks/QuartzCore.framework; sourceTree = SDKROOT; };
 		934F78C52E9D3096009F43BF /* Foundation.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = Foundation.framework; path = System/Library/Frameworks/Foundation.framework; sourceTree = SDKROOT; };
-		9365022E2E995B5D0018DCB2 /* GPUDBMentalBenchmark */ = {isa = PBXFileReference; explicitFileType = "compiled.mach-o.executable"; includeInIndex = 0; path = GPUDBMentalBenchmark; sourceTree = BUILT_PRODUCTS_DIR; };
+		9365022E2E995B5D0018DCB2 /* GPUDBMetalBenchmark */ = {isa = PBXFileReference; explicitFileType = "compiled.mach-o.executable"; includeInIndex = 0; path = GPUDBMetalBenchmark; sourceTree = BUILT_PRODUCTS_DIR; };
 		9365023F2E995E6B0018DCB2 /* Metal.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = Metal.framework; path = System/Library/Frameworks/Metal.framework; sourceTree = SDKROOT; };
 /* End PBXFileReference section */
 
 /* Begin PBXFileSystemSynchronizedRootGroup section */
-		936502302E995B5D0018DCB2 /* GPUDBMentalBenchmark */ = {
+		936502302E995B5D0018DCB2 /* GPUDBMetalBenchmark */ = {
 			isa = PBXFileSystemSynchronizedRootGroup;
-			path = GPUDBMentalBenchmark;
+			path = GPUDBMetalBenchmark;
 			sourceTree = "<group>";
 		};
 /* End PBXFileSystemSynchronizedRootGroup section */
@@ -62,7 +62,7 @@
 				9329C8932E99AC5B00E6EC56 /* readme.md */,
 				9329C8912E99A1DF00E6EC56 /* TPC-H Query 1.txt */,
 				9365022F2E995B5D0018DCB2 /* Products */,
-				936502302E995B5D0018DCB2 /* GPUDBMentalBenchmark */,
+				936502302E995B5D0018DCB2 /* GPUDBMetalBenchmark */,
 				9365023E2E995E6A0018DCB2 /* Frameworks */,
 			);
 			sourceTree = "<group>";
@@ -70,7 +70,7 @@
 		9365022F2E995B5D0018DCB2 /* Products */ = {
 			isa = PBXGroup;
 			children = (
-				9365022E2E995B5D0018DCB2 /* GPUDBMentalBenchmark */,
+				9365022E2E995B5D0018DCB2 /* GPUDBMetalBenchmark */,
 			);
 			name = Products;
 			sourceTree = "<group>";
@@ -88,9 +88,9 @@
 /* End PBXGroup section */
 
 /* Begin PBXNativeTarget section */
-		9365022D2E995B5D0018DCB2 /* GPUDBMentalBenchmark */ = {
+		9365022D2E995B5D0018DCB2 /* GPUDBMetalBenchmark */ = {
 			isa = PBXNativeTarget;
-			buildConfigurationList = 936502352E995B5D0018DCB2 /* Build configuration list for PBXNativeTarget "GPUDBMentalBenchmark" */;
+			buildConfigurationList = 936502352E995B5D0018DCB2 /* Build configuration list for PBXNativeTarget "GPUDBMetalBenchmark" */;
 			buildPhases = (
 				9365022A2E995B5D0018DCB2 /* Sources */,
 				9365022B2E995B5D0018DCB2 /* Frameworks */,
@@ -101,13 +101,13 @@
 			dependencies = (
 			);
 			fileSystemSynchronizedGroups = (
-				936502302E995B5D0018DCB2 /* GPUDBMentalBenchmark */,
+				936502302E995B5D0018DCB2 /* GPUDBMetalBenchmark */,
 			);
-			name = GPUDBMentalBenchmark;
+			name = GPUDBMetalBenchmark;
 			packageProductDependencies = (
 			);
-			productName = GPUDBMentalBenchmark;
-			productReference = 9365022E2E995B5D0018DCB2 /* GPUDBMentalBenchmark */;
+			productName = GPUDBMetalBenchmark;
+			productReference = 9365022E2E995B5D0018DCB2 /* GPUDBMetalBenchmark */;
 			productType = "com.apple.product-type.tool";
 		};
 /* End PBXNativeTarget section */
@@ -125,7 +125,7 @@
 					};
 				};
 			};
-			buildConfigurationList = 936502292E995B5D0018DCB2 /* Build configuration list for PBXProject "GPUDBMentalBenchmark" */;
+			buildConfigurationList = 936502292E995B5D0018DCB2 /* Build configuration list for PBXProject "GPUDBMetalBenchmark" */;
 			developmentRegion = en;
 			hasScannedForEncodings = 0;
 			knownRegions = (
@@ -139,7 +139,7 @@
 			projectDirPath = "";
 			projectRoot = "";
 			targets = (
-				9365022D2E995B5D0018DCB2 /* GPUDBMentalBenchmark */,
+				9365022D2E995B5D0018DCB2 /* GPUDBMetalBenchmark */,
 			);
 		};
 /* End PBXProject section */
@@ -276,7 +276,7 @@
 			buildSettings = {
 				CLANG_ENABLE_MODULES = YES;
 				CODE_SIGN_STYLE = Automatic;
-				HEADER_SEARCH_PATHS = "\"$(SRCROOT)/GPUDBMentalBenchmark/metal-cpp\"";
+				HEADER_SEARCH_PATHS = "\"$(SRCROOT)/GPUDBMetalBenchmark/metal-cpp\"";
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				SWIFT_OPTIMIZATION_LEVEL = "-Onone";
 				SWIFT_VERSION = 6.0;
@@ -288,7 +288,7 @@
 			buildSettings = {
 				CLANG_ENABLE_MODULES = YES;
 				CODE_SIGN_STYLE = Automatic;
-				HEADER_SEARCH_PATHS = "\"$(SRCROOT)/GPUDBMentalBenchmark/metal-cpp\"";
+				HEADER_SEARCH_PATHS = "\"$(SRCROOT)/GPUDBMetalBenchmark/metal-cpp\"";
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				SWIFT_VERSION = 6.0;
 			};
@@ -297,7 +297,7 @@
 /* End XCBuildConfiguration section */
 
 /* Begin XCConfigurationList section */
-		936502292E995B5D0018DCB2 /* Build configuration list for PBXProject "GPUDBMentalBenchmark" */ = {
+		936502292E995B5D0018DCB2 /* Build configuration list for PBXProject "GPUDBMetalBenchmark" */ = {
 			isa = XCConfigurationList;
 			buildConfigurations = (
 				936502332E995B5D0018DCB2 /* Debug */,
@@ -306,7 +306,7 @@
 			defaultConfigurationIsVisible = 0;
 			defaultConfigurationName = Release;
 		};
-		936502352E995B5D0018DCB2 /* Build configuration list for PBXNativeTarget "GPUDBMentalBenchmark" */ = {
+		936502352E995B5D0018DCB2 /* Build configuration list for PBXNativeTarget "GPUDBMetalBenchmark" */ = {
 			isa = XCConfigurationList;
 			buildConfigurations = (
 				936502362E995B5D0018DCB2 /* Debug */,

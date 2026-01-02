@@ -1,13 +1,13 @@
-# GPU Database Mental Benchmark Makefile
+# GPU Database Metal Benchmark Makefile
 # Builds C++ project using metal-cpp library with precise paths
 
 # Project Configuration
-PROJECT_NAME = GPUDBMentalBenchmark
-SOURCE_FILE = /Users/tea/Documents/GPUDBMentalBenchmark/GPUDBMentalBenchmark/Sourse/main.cpp
-KERNEL_DIR = /Users/tea/Documents/GPUDBMentalBenchmark/GPUDBMentalBenchmark/Kernels
-METAL_CPP_DIR = /Users/tea/Documents/GPUDBMentalBenchmark/GPUDBMentalBenchmark/metal-cpp
-DATA_DIR = /Users/tea/Documents/GPUDBMentalBenchmark/GPUDBMentalBenchmark/Data
-BUILD_DIR = /Users/tea/Documents/GPUDBMentalBenchmark/build
+PROJECT_NAME = GPUDBMetalBenchmark
+SOURCE_FILE = /Users/tea/Documents/GPUDBMetalBenchmark/GPUDBMetalBenchmark/Source/main.cpp
+KERNEL_DIR = /Users/tea/Documents/GPUDBMetalBenchmark/GPUDBMetalBenchmark/Kernels
+METAL_CPP_DIR = /Users/tea/Documents/GPUDBMetalBenchmark/GPUDBMetalBenchmark/metal-cpp
+DATA_DIR = /Users/tea/Documents/GPUDBMetalBenchmark/GPUDBMetalBenchmark/Data
+BUILD_DIR = /Users/tea/Documents/GPUDBMetalBenchmark/build
 BIN_DIR = $(BUILD_DIR)/bin
 OBJ_DIR = $(BUILD_DIR)/obj
 
@@ -60,14 +60,14 @@ clean:
 .PHONY: run
 run: $(TARGET)
 	@echo "Running $(PROJECT_NAME)..."
-	@cd /Users/tea/Documents/GPUDBMentalBenchmark/GPUDBMentalBenchmark && $(TARGET)
+	@cd /Users/tea/Documents/GPUDBMetalBenchmark/GPUDBMetalBenchmark && $(TARGET)
 
 # Run with SF-1 dataset
 .PHONY: run-sf1
 run-sf1: $(TARGET)
 	@echo "Running $(PROJECT_NAME) with SF-1 dataset..."
-	@cd /Users/tea/Documents/GPUDBMentalBenchmark/GPUDBMentalBenchmark && \
-	sed 's/SF-10/SF-1/g' Sourse/main.cpp > /tmp/main_sf1.cpp && \
+	@cd /Users/tea/Documents/GPUDBMetalBenchmark/GPUDBMetalBenchmark && \
+	sed 's/SF-10/SF-1/g' Source/main.cpp > /tmp/main_sf1.cpp && \
 	$(CXX) $(CXXFLAGS) $(INCLUDES) /tmp/main_sf1.cpp $(FRAMEWORKS) -o $(BIN_DIR)/$(PROJECT_NAME)_sf1 && \
 	$(BIN_DIR)/$(PROJECT_NAME)_sf1
 
@@ -103,38 +103,38 @@ check:
 .PHONY: run-q1
 run-q1: $(TARGET)
 	@echo "Running TPC-H Query 1 benchmark..."
-	@cd /Users/tea/Documents/GPUDBMentalBenchmark/GPUDBMentalBenchmark && $(TARGET) q1
+	@cd /Users/tea/Documents/GPUDBMetalBenchmark/GPUDBMetalBenchmark && $(TARGET) q1
 
 .PHONY: run-q3
 run-q3: $(TARGET)
 	@echo "Running TPC-H Query 3 benchmark..."
-	@cd /Users/tea/Documents/GPUDBMentalBenchmark/GPUDBMentalBenchmark && $(TARGET) q3
+	@cd /Users/tea/Documents/GPUDBMetalBenchmark/GPUDBMetalBenchmark && $(TARGET) q3
 
 .PHONY: run-q6
 run-q6: $(TARGET)
 	@echo "Running TPC-H Query 6 benchmark..."
-	@cd /Users/tea/Documents/GPUDBMentalBenchmark/GPUDBMentalBenchmark && $(TARGET) q6
+	@cd /Users/tea/Documents/GPUDBMetalBenchmark/GPUDBMetalBenchmark && $(TARGET) q6
 
 .PHONY: run-q9
 run-q9: $(TARGET)
 	@echo "Running TPC-H Query 9 benchmark..."
-	@cd /Users/tea/Documents/GPUDBMentalBenchmark/GPUDBMentalBenchmark && $(TARGET) q9
+	@cd /Users/tea/Documents/GPUDBMetalBenchmark/GPUDBMetalBenchmark && $(TARGET) q9
 
 .PHONY: run-q13
 run-q13: $(TARGET)
 	@echo "Running TPC-H Query 13 benchmark..."
-	@cd /Users/tea/Documents/GPUDBMentalBenchmark/GPUDBMentalBenchmark && $(TARGET) q13
+	@cd /Users/tea/Documents/GPUDBMetalBenchmark/GPUDBMetalBenchmark && $(TARGET) q13
 
 # Run all TPC-H queries
 .PHONY: run-all-queries
 run-all-queries: $(TARGET)
 	@echo "Running all TPC-H Query benchmarks..."
-	@cd /Users/tea/Documents/GPUDBMentalBenchmark/GPUDBMentalBenchmark && $(TARGET)
+	@cd /Users/tea/Documents/GPUDBMetalBenchmark/GPUDBMetalBenchmark && $(TARGET)
 
 # Show help
 .PHONY: help
 help:
-	@echo "GPU Database Mental Benchmark - Makefile Help"
+	@echo "GPU Database Metal Benchmark - Makefile Help"
 	@echo "=============================================="
 	@echo ""
 	@echo "Available targets:"

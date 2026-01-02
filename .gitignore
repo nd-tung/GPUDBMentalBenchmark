@@ -1,12 +1,12 @@
 # =========================
-# Git ignore for GPUDBMentalBenchmark
+# Git ignore for GPUDBMetalBenchmark
 # =========================
 
 # Ignore all datasets and large files
-GPUDBMentalBenchmark/Data/SF-1/
+GPUDBMetalBenchmark/Data/SF-1/
 *.tbl
 
-GPUDBMentalBenchmark/Data/SF-10/
+GPUDBMetalBenchmark/Data/SF-10/
 *.tbl
 
 

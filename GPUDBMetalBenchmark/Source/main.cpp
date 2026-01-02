@@ -15,7 +15,7 @@
 #include <cmath>
 
 // Global dataset configuration
-std::string g_dataset_path = "Data/SF-1/"; // Default to SF-10
+std::string g_dataset_path = "GPUDBMetalBenchmark/Data/SF-1/"; // Default to SF-10
 
 // --- Helper to Load Integer Column ---
 std::vector<int> loadIntColumn(const std::string& filePath, int columnIndex) {
@@ -1474,8 +1474,8 @@ void runQ13Benchmark(MTL::Device* pDevice, MTL::CommandQueue* pCommandQueue, MTL
 
 
 void showHelp() {
-    std::cout << "GPU Database Mental Benchmark" << std::endl;
-    std::cout << "Usage: GPUDBMentalBenchmark [sf1|sf10] [query]" << std::endl;
+    std::cout << "GPU Database Metal Benchmark" << std::endl;
+    std::cout << "Usage: GPUDBMetalBenchmark [sf1|sf10] [query]" << std::endl;
     std::cout << "" << std::endl;
     std::cout << "Available queries:" << std::endl;
     std::cout << "  all           - Run all benchmarks (default)" << std::endl;
@@ -1490,19 +1490,19 @@ void showHelp() {
     std::cout << "  help          - Show this help message" << std::endl;
     std::cout << "" << std::endl;
     std::cout << "Examples:" << std::endl;
-    std::cout << "  GPUDBMentalBenchmark        # Run all benchmarks" << std::endl;
-    std::cout << "  GPUDBMentalBenchmark q1     # Run only TPC-H Query 1" << std::endl;
-    std::cout << "  GPUDBMentalBenchmark q3     # Run only TPC-H Query 3" << std::endl;
-    std::cout << "  GPUDBMentalBenchmark sf10 q13  # Run Q13 on SF-10" << std::endl;
+    std::cout << "  GPUDBMetalBenchmark        # Run all benchmarks" << std::endl;
+    std::cout << "  GPUDBMetalBenchmark q1     # Run only TPC-H Query 1" << std::endl;
+    std::cout << "  GPUDBMetalBenchmark q3     # Run only TPC-H Query 3" << std::endl;
+    std::cout << "  GPUDBMetalBenchmark sf10 q13  # Run Q13 on SF-10" << std::endl;
 }
 
 // --- Main Entry Point ---
 int main(int argc, const char * argv[]) {
     // Parse command line arguments
     // Supports either:
-    //   GPUDBMentalBenchmark q13
-    //   GPUDBMentalBenchmark sf10 q13
-    //   GPUDBMentalBenchmark q13 sf10
+    //   GPUDBMetalBenchmark q13
+    //   GPUDBMetalBenchmark sf10 q13
+    //   GPUDBMetalBenchmark q13 sf10
     std::string query = "all"; // default to running all benchmarks
     for (int i = 1; i < argc; ++i) {
         std::string arg(argv[i]);
@@ -1511,11 +1511,11 @@ int main(int argc, const char * argv[]) {
             return 0;
         }
         if (arg == "sf1") {
-            g_dataset_path = "Data/SF-1/";
+            g_dataset_path = "GPUDBMetalBenchmark/Data/SF-1/";
             continue;
         }
         if (arg == "sf10") {
-            g_dataset_path = "Data/SF-10/";
+            g_dataset_path = "GPUDBMetalBenchmark/Data/SF-10/";
             continue;
         }
         // Otherwise treat as the query selector.

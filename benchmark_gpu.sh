@@ -2,7 +2,7 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-BUILD_BIN="$SCRIPT_DIR/build/bin/GPUDBMentalBenchmark"
+BUILD_BIN="$SCRIPT_DIR/build/bin/GPUDBMetalBenchmark"
 RESULTS_DIR="$SCRIPT_DIR/benchmark_results"
 TIMESTAMP=$(date +"%Y%m%d_%H%M%S")
 
@@ -60,7 +60,7 @@ run_and_capture() {
 
 # Ensure binary exists
 if [[ ! -x "$BUILD_BIN" ]]; then
-  echo "Error: GPUDBMentalBenchmark binary not found at $BUILD_BIN" >&2
+  echo "Error: GPUDBMetalBenchmark binary not found at $BUILD_BIN" >&2
   exit 1
 fi
 

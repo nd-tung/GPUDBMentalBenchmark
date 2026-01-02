@@ -110,7 +110,7 @@ inline bool q13_has_special_requests(const unsigned char* s, int comment_len) {
 }
 
 int main() {
-    std::ifstream file("GPUDBMentalBenchmark/Data/SF-1/orders.tbl");
+    std::ifstream file("GPUDBMetalBenchmark/Data/SF-1/orders.tbl");
     std::string line;
     int count_gpu_match = 0;
     while (std::getline(file, line)) {

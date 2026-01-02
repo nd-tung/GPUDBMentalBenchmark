@@ -6,7 +6,7 @@ set -e
 
 # Parse command line arguments
 SCALE_FACTOR=${1:-SF-1}
-DATA_DIR="GPUDBMentalBenchmark/Data/${SCALE_FACTOR}"
+DATA_DIR="GPUDBMetalBenchmark/Data/${SCALE_FACTOR}"
 RESULTS_FILE="benchmark_results/cedardb_results.csv"
 TIMESTAMP=$(date +"%Y%m%d_%H%M%S")
 

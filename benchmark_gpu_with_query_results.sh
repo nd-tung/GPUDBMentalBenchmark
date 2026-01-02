@@ -5,7 +5,7 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-BUILD_BIN="$SCRIPT_DIR/build/bin/GPUDBMentalBenchmark"
+BUILD_BIN="$SCRIPT_DIR/build/bin/GPUDBMetalBenchmark"
 RESULTS_DIR="$SCRIPT_DIR/benchmark_results"
 LOG_DIR="$RESULTS_DIR/gpu_logs"
 TIMESTAMP=$(date +"%Y%m%d_%H%M%S")
@@ -29,7 +29,7 @@ fi
 
 # Ensure binary exists
 if [[ ! -x "$BUILD_BIN" ]]; then
-  echo "Error: GPUDBMentalBenchmark binary not found at $BUILD_BIN" >&2
+  echo "Error: GPUDBMetalBenchmark binary not found at $BUILD_BIN" >&2
   echo "Please run 'make' to build the binary first."
   exit 1
 fi
@@ -40,10 +40,10 @@ run_and_capture_with_results() {
   local out_file="${LOG_DIR}/${TIMESTAMP}/${sf_label}_full.log"
   
   echo "Running GPU benchmarks for ${sf_label}..."
-  echo "  Executing: $BUILD_BIN $sf_arg (from GPUDBMentalBenchmark directory)"
+  echo "  Executing: $BUILD_BIN $sf_arg (from GPUDBMetalBenchmark directory)"
   
-  # Run benchmark from GPUDBMentalBenchmark directory where .metallib is located
-  (cd "$SCRIPT_DIR/GPUDBMentalBenchmark" && "$BUILD_BIN" "$sf_arg") | tee "$out_file"
+  # Run benchmark from GPUDBMetalBenchmark directory where .metallib is located
+  (cd "$SCRIPT_DIR/GPUDBMetalBenchmark" && "$BUILD_BIN" "$sf_arg") | tee "$out_file"
   
   echo ""
   echo "Extracting results for ${sf_label}..."

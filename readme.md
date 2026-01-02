@@ -105,8 +105,8 @@ cat benchmark_results/cedardb_results.csv
 ### Manual Execution
 ```bash
 # Run individual queries manually
-./build/bin/GPUDBMentalBenchmark sf1 q1
-./build/bin/GPUDBMentalBenchmark sf10 q13
+./build/bin/GPUDBMetalBenchmark sf1 q1
+./build/bin/GPUDBMetalBenchmark sf10 q13
 ```
 
 ## Benchmark Scripts
@@ -117,7 +117,7 @@ The project includes automated benchmark scripts for running comprehensive perfo
 ```bash
 ./create_tpch_data.sh
 ```
-Generates TPC-H benchmark data at different scale factors (SF-1, SF-10). Downloads and compiles the TPC-H dbgen tool, then generates `.tbl` files in `GPUDBMentalBenchmark/Data/`.
+Generates TPC-H benchmark data at different scale factors (SF-1, SF-10). Downloads and compiles the TPC-H dbgen tool, then generates `.tbl` files in `GPUDBMetalBenchmark/Data/`.
 
 ### GPU Benchmarks
 ```bash
