@@ -5,7 +5,7 @@ import sys
 from datetime import datetime
 
 repo_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-results_dir = os.path.join(repo_dir, 'benchmark_results')
+results_dir = os.path.join(repo_dir, 'results')
 
 def load_duckdb_results(path):
     import re

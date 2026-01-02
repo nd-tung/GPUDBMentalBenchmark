@@ -2,8 +2,9 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-BUILD_BIN="$SCRIPT_DIR/build/bin/GPUDBMetalBenchmark"
-RESULTS_DIR="$SCRIPT_DIR/benchmark_results"
+PROJECT_ROOT="$(dirname "$SCRIPT_DIR")"
+BUILD_BIN="$PROJECT_ROOT/build/bin/GPUDBMetalBenchmark"
+RESULTS_DIR="$PROJECT_ROOT/results"
 TIMESTAMP=$(date +"%Y%m%d_%H%M%S")
 
 mkdir -p "$RESULTS_DIR"
@@ -64,7 +65,14 @@ if [[ ! -x "$BUILD_BIN" ]]; then
   exit 1
 fi
 
-run_and_capture sf1 SF-1
-run_and_capture sf10 SF-10 || true
+MODE="${1:-all}"
+
+if [[ "$MODE" == "sf1" || "$MODE" == "all" ]]; then
+  run_and_capture sf1 SF-1
+fi
+
+if [[ "$MODE" == "sf10" || "$MODE" == "all" ]]; then
+  run_and_capture sf10 SF-10 || true
+fi
 
 echo "GPU results saved to: $GPU_CSV"

@@ -5,10 +5,12 @@
 set -e
 
 # Parse command line arguments
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+PROJECT_ROOT="$(dirname "$SCRIPT_DIR")"
 SCALE_FACTOR=${1:-SF-1}
-DATA_DIR="GPUDBMetalBenchmark/Data/${SCALE_FACTOR}"
-RESULTS_FILE="benchmark_results/duckdb_results.csv"
-LOG_DIR="benchmark_results/duckdb_logs"
+DATA_DIR="$PROJECT_ROOT/data/${SCALE_FACTOR}"
+RESULTS_FILE="$PROJECT_ROOT/results/duckdb_results.csv"
+LOG_DIR="$PROJECT_ROOT/results/duckdb_logs"
 TIMESTAMP=$(date +"%Y%m%d_%H%M%S")
 DB_FILE="/tmp/duckdb_benchmark_${TIMESTAMP}.duckdb"
 

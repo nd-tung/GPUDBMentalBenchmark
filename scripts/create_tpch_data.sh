@@ -7,8 +7,8 @@ set -e  # Exit on any error
 
 # Configuration
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-PROJECT_DIR="$SCRIPT_DIR"
-DATA_DIR="$PROJECT_DIR/GPUDBMetalBenchmark/Data"
+PROJECT_DIR="$(dirname "$SCRIPT_DIR")"
+DATA_DIR="$PROJECT_DIR/data"
 TEMP_DIR="$PROJECT_DIR/temp_tpch"
 DBGEN_URL="https://github.com/electrum/tpch-dbgen.git"
 

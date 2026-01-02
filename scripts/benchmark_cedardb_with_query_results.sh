@@ -5,10 +5,12 @@
 set -e
 
 # Parse command line arguments
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+PROJECT_ROOT="$(dirname "$SCRIPT_DIR")"
 SCALE_FACTOR=${1:-SF-1}
-DATA_DIR="GPUDBMetalBenchmark/Data/${SCALE_FACTOR}"
-RESULTS_FILE="benchmark_results/cedardb_results.csv"
-LOG_DIR="benchmark_results/cedardb_logs"
+DATA_DIR="$PROJECT_ROOT/data/${SCALE_FACTOR}"
+RESULTS_FILE="$PROJECT_ROOT/results/cedardb_results.csv"
+LOG_DIR="$PROJECT_ROOT/results/cedardb_logs"
 TIMESTAMP=$(date +"%Y%m%d_%H%M%S")
 
 # CedarDB connection details

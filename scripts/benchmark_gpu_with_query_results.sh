@@ -5,8 +5,9 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-BUILD_BIN="$SCRIPT_DIR/build/bin/GPUDBMetalBenchmark"
-RESULTS_DIR="$SCRIPT_DIR/benchmark_results"
+PROJECT_ROOT="$(dirname "$SCRIPT_DIR")"
+BUILD_BIN="$PROJECT_ROOT/build/bin/GPUDBMetalBenchmark"
+RESULTS_DIR="$PROJECT_ROOT/results"
 LOG_DIR="$RESULTS_DIR/gpu_logs"
 TIMESTAMP=$(date +"%Y%m%d_%H%M%S")
 GPU_CSV="$RESULTS_DIR/gpu_results.csv"
@@ -40,10 +41,10 @@ run_and_capture_with_results() {
   local out_file="${LOG_DIR}/${TIMESTAMP}/${sf_label}_full.log"
   
   echo "Running GPU benchmarks for ${sf_label}..."
-  echo "  Executing: $BUILD_BIN $sf_arg (from GPUDBMetalBenchmark directory)"
+  echo "  Executing: $BUILD_BIN $sf_arg (from project root)"
   
-  # Run benchmark from GPUDBMetalBenchmark directory where .metallib is located
-  (cd "$SCRIPT_DIR/GPUDBMetalBenchmark" && "$BUILD_BIN" "$sf_arg") | tee "$out_file"
+  # Run benchmark from project root where .metallib is located
+  (cd "$PROJECT_ROOT" && "$BUILD_BIN" "$sf_arg") | tee "$out_file"
   
   echo ""
   echo "Extracting results for ${sf_label}..."
@@ -152,8 +153,15 @@ run_and_capture_with_results() {
 }
 
 # Run benchmarks
-run_and_capture_with_results sf1 SF-1
-run_and_capture_with_results sf10 SF-10
+MODE="${1:-all}"
+
+if [[ "$MODE" == "sf1" || "$MODE" == "all" ]]; then
+  run_and_capture_with_results sf1 SF-1
+fi
+
+if [[ "$MODE" == "sf10" || "$MODE" == "all" ]]; then
+  run_and_capture_with_results sf10 SF-10
+fi
 
 echo ""
 echo "=== Benchmark Complete ==="

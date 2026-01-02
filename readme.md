@@ -89,17 +89,17 @@ docker pull cedardb/cedardb
 make
 
 # 2. Generate test data (if not already generated)
-./create_tpch_data.sh
+./scripts/create_tpch_data.sh
 
 # 3. Run all benchmarks
-./benchmark_gpu.sh SF-1 SF-10
-./benchmark_duckdb.sh SF-1 SF-10
-./benchmark_cedardb.sh SF-1 SF-10  # Requires Docker
+./scripts/benchmark_gpu.sh sf1
+./scripts/benchmark_duckdb.sh SF-1
+./scripts/benchmark_cedardb.sh SF-1  # Requires Docker
 
 # 4. View results
-cat benchmark_results/gpu_results.csv
-cat benchmark_results/duckdb_results.csv
-cat benchmark_results/cedardb_results.csv
+cat results/gpu_results.csv
+cat results/duckdb_results.csv
+cat results/cedardb_results.csv
 ```
 
 ### Manual Execution
@@ -115,31 +115,31 @@ The project includes automated benchmark scripts for running comprehensive perfo
 
 ### Data Generation
 ```bash
-./create_tpch_data.sh
+./scripts/create_tpch_data.sh
 ```
-Generates TPC-H benchmark data at different scale factors (SF-1, SF-10). Downloads and compiles the TPC-H dbgen tool, then generates `.tbl` files in `GPUDBMetalBenchmark/Data/`.
+Generates TPC-H benchmark data at different scale factors (SF-1, SF-10). Downloads and compiles the TPC-H dbgen tool, then generates `.tbl` files in `data/`.
 
 ### GPU Benchmarks
 ```bash
-./benchmark_gpu.sh SF-1 SF-10
+./scripts/benchmark_gpu.sh sf1
 ```
-Runs all TPC-H queries (Q1, Q3, Q6, Q9, Q13) on GPU Metal implementation and saves timing results to `benchmark_results/gpu_results.csv`.
+Runs all TPC-H queries (Q1, Q3, Q6, Q9, Q13) on GPU Metal implementation and saves timing results to `results/gpu_results.csv`.
 
 ```bash
-./benchmark_gpu_with_query_results.sh SF-1 SF-10
+./scripts/benchmark_gpu_with_query_results.sh sf1
 ```
-Extended version that also saves complete query results to `benchmark_results/gpu_logs/` for verification.
+Extended version that also saves complete query results to `results/gpu_logs/` for verification.
 
 ### DuckDB Benchmarks
 ```bash
-./benchmark_duckdb.sh SF-1 SF-10
+./scripts/benchmark_duckdb.sh SF-1
 ```
-Runs all queries on DuckDB and saves results to `benchmark_results/duckdb_results.csv`.
+Runs all queries on DuckDB and saves results to `results/duckdb_results.csv`.
 
 ```bash
-./benchmark_duckdb_with_query_results.sh SF-1 SF-10
+./scripts/benchmark_duckdb_with_query_results.sh SF-1
 ```
-Extended version with query result export to `benchmark_results/duckdb_logs/`.
+Extended version with query result export to `results/duckdb_logs/`.
 
 ### CedarDB Benchmarks
 ```bash
@@ -147,12 +147,12 @@ Extended version with query result export to `benchmark_results/duckdb_logs/`.
 docker run -d --name cedardb -p 5432:5432 -e CEDAR_PASSWORD=cedar --memory=12g cedardb/cedardb
 
 # Run benchmarks
-./benchmark_cedardb.sh SF-1 SF-10
+./scripts/benchmark_cedardb.sh SF-1
 ```
-Runs queries on CedarDB via Docker and saves to `benchmark_results/cedardb_results.csv`.
+Runs queries on CedarDB via Docker and saves to `results/cedardb_results.csv`.
 
 ```bash
-./benchmark_cedardb_with_query_results.sh SF-1 SF-10
+./scripts/benchmark_cedardb_with_query_results.sh SF-1
 ```
 Extended version with query result logging.
 

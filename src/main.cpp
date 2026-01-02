@@ -15,7 +15,7 @@
 #include <cmath>
 
 // Global dataset configuration
-std::string g_dataset_path = "GPUDBMetalBenchmark/Data/SF-1/"; // Default to SF-10
+std::string g_dataset_path = "data/SF-1/"; // Default to SF-10
 
 // --- Helper to Load Integer Column ---
 std::vector<int> loadIntColumn(const std::string& filePath, int columnIndex) {
@@ -1511,11 +1511,11 @@ int main(int argc, const char * argv[]) {
             return 0;
         }
         if (arg == "sf1") {
-            g_dataset_path = "GPUDBMetalBenchmark/Data/SF-1/";
+            g_dataset_path = "data/SF-1/";
             continue;
         }
         if (arg == "sf10") {
-            g_dataset_path = "GPUDBMetalBenchmark/Data/SF-10/";
+            g_dataset_path = "data/SF-10/";
             continue;
         }
         // Otherwise treat as the query selector.

@@ -3,10 +3,10 @@
 
 # Project Configuration
 PROJECT_NAME = GPUDBMetalBenchmark
-SOURCE_DIR = GPUDBMetalBenchmark/Source
-KERNEL_DIR = GPUDBMetalBenchmark/Kernels
-METAL_CPP_DIR = GPUDBMetalBenchmark/metal-cpp
-DATA_DIR = GPUDBMetalBenchmark/Data
+SOURCE_DIR = src
+KERNEL_DIR = kernels
+METAL_CPP_DIR = third_party/metal-cpp
+DATA_DIR = data
 BUILD_DIR = build
 BIN_DIR = $(BUILD_DIR)/bin
 OBJ_DIR = $(BUILD_DIR)/obj
@@ -55,7 +55,6 @@ $(KERNEL_METALLIB): $(KERNEL_AIR)
 	@echo "Linking Metal library (.metallib)..."
 	$(METALLIB) $(KERNEL_AIR) -o $(KERNEL_METALLIB)
 	@# Copy to runtime location so device->newLibrary("default.metallib") finds the latest
-	cp $(KERNEL_METALLIB) GPUDBMetalBenchmark/default.metallib
 	cp $(KERNEL_METALLIB) default.metallib
 
 # Compile source files

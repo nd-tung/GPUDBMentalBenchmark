@@ -15,8 +15,9 @@ NC='\033[0m' # No Color
 
 # Configuration
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-DATA_DIR="$SCRIPT_DIR/GPUDBMetalBenchmark/Data"
-RESULTS_DIR="$SCRIPT_DIR/benchmark_results"
+PROJECT_ROOT="$(dirname "$SCRIPT_DIR")"
+DATA_DIR="$PROJECT_ROOT/data"
+RESULTS_DIR="$PROJECT_ROOT/results"
 TIMESTAMP=$(date +"%Y%m%d_%H%M%S")
 DB_FILE="/tmp/benchmark_${TIMESTAMP}.duckdb"
 
